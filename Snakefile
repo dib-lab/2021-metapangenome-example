@@ -62,7 +62,7 @@ rule kmer_trim_reads:
         'outputs/bbduk/{sample}_R1.nohost.fq.gz',
         'outputs/bbduk/{sample}_R2.nohost.fq.gz'
     output: "outputs/abundtrim/{sample}.abundtrim.fq.gz"
-    conda: 'envs/sourmash.yml'
+    conda: 'envs/khmer.yml'
     threads: 1
     resources:
         mem_mb=61000,

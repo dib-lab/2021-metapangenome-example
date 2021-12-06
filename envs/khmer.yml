@@ -3,7 +3,4 @@ channels:
    - bioconda
    - defaults
 dependencies:
-   - sourmash=4.0.0
-   - fastp=0.20.1
-   - bbmap=38.70
    - khmer=3.0.0a3
