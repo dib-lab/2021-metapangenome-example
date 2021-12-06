@@ -2,10 +2,11 @@ SAMPLES = ['HSM67VF9', 'HSM67VFD', 'HSM67VFJ', 'HSM6XRQB',
            'HSM6XRQI', 'HSM6XRQK', 'HSM6XRQM', 'HSM6XRQO',
            'HSM7CYY7', 'HSM7CYY9', 'HSM7CYYB', 'HSM7CYYD']
 RADIUS = ['1']
+TMPDIR = "/scratch/tereiter"
 
 rule all:
     input: 
-        expand("outputs/sourmash_gather/{sample}_gather_gtdb-rs202-genomic-reps.csv", sample = SAMPLE)
+        expand("outputs/sourmash_gather/{sample}_gather_gtdb-rs202-genomic-reps.csv", sample = SAMPLES)
 
 rule fastp:
     input:
@@ -19,7 +20,8 @@ rule fastp:
     conda: "envs/fastp.yml"
     threads: 1
     resources:
-        mem_mb=16000
+        mem_mb=16000,
+        tmpdir = TMPDIR
     benchmark: "benchmarks/{sample}_fastp.tsv"
     shell:'''
     fastp --in1 {input.R1} \
@@ -48,7 +50,8 @@ rule remove_host:
     conda: 'envs/bbmap.yml'
     threads: 1
     resources:
-        mem_mb=64000
+        mem_mb=64000,
+        tmpdir = TMPDIR
     benchmark: "benchmarks/{sample}_rmhost.tsv"
     shell:'''
     bbduk.sh -Xmx64g t=3 in={input.r1} in2={input.r2} out={output.r1} out2={output.r2} outm={output.human_r1} outm2={output.human_r2} k=31 ref={input.human}
@@ -62,7 +65,8 @@ rule kmer_trim_reads:
     conda: 'envs/sourmash.yml'
     threads: 1
     resources:
-        mem_mb=61000
+        mem_mb=61000,
+        tmpdir = TMPDIR
     benchmark: "benchmarks/{sample}_kmer_trim.tsv"
     shell:'''
     interleave-reads.py {input} | trim-low-abund.py --gzip -C 3 -Z 18 -M 60e9 -V - -o {output}
@@ -78,7 +82,7 @@ rule sourmash_sketch:
     threads: 1
     benchmark: "benchmarks/{sample}_sketch.tsv"
     shell:"""
-    sourmash sketch dna -p k=31,scaled=2000 -o {output} --name {wildcards.acc} {input}
+    sourmash sketch dna -p k=31,scaled=2000 -o {output} --name {wildcards.sample} {input}
     """
 
 rule gather:
@@ -87,11 +91,12 @@ rule gather:
         db="/group/ctbrowngrp/gtdb/databases/ctb/gtdb-rs202.genomic-reps.k31.sbt.zip",
     output: 
         csv="outputs/sourmash_gather/{sample}_gather_gtdb-rs202-genomic-reps.csv",
-        matches="outputs/sourmash_gather/{sample}_gather_gtdb-rs202-genomic-reps.matches"
+        matches="outputs/sourmash_gather/{sample}_gather_gtdb-rs202-genomic-reps.matches",
         un="outputs/sourmash_gather/{sample}_gather_gtdb-rs202-genomic-reps.un"
     conda: 'envs/sourmash.yml'
     resources:
-        mem_mb = 128000
+        mem_mb = 128000,
+        tmpdir = TMPDIR
     threads: 1
     benchmark: "benchmarks/{sample}_gather.tsv"
     shell:'''
