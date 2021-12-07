@@ -1,0 +1,4 @@
+sample:
+- gather_gtdb-rs202-genomic
+outdir: outputs
+metagenome_trim_memory: 1e9
