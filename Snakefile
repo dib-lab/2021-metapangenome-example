@@ -163,6 +163,7 @@ checkpoint gather_to_sgc_queries:
         gather=expand("outputs/sample_gather/{sample}_gather_gtdb-rs202-genomic.csv", sample = SAMPLES),
     output: 
         gather_grist = "outputs/genbank/gather_gtdb-rs202-genomic.x.genbank.gather.csv",
+        pdf="figures/common_species_breakdown.pdf"
     conda: "envs/tidy.yml"
     resources:
         mem_mb = 8000
