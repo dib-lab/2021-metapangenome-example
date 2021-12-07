@@ -107,7 +107,7 @@ sgc_genomes <- gather_results %>%
   arrange(desc(sum_f_unique_to_query)) %>%
   slice(1)
 
-gather_sgc_queries <- unlist(snakemake@input[['gather']])[1] %>%
+gather_sgc_queries <- unlist(snakemake@input[['gather']])[6] %>%
 #gather_sgc_queries <- Sys.glob("outputs/sample_gather/*genomic.csv")[6] %>%
   map_dfr(read_csv, col_types = c("dddddlllcccddddcccd")) %>%
   filter(name %in% sgc_genomes$name)
