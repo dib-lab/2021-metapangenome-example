@@ -42,7 +42,7 @@ class Checkpoint_GatherResults:
 
 rule all:
     input: 
-        expand("outputs/sample_gather/{sample}_gather_gtdb-rs202-genomic.csv", sample = SAMPLES)
+        Checkpoint_GatherResults("outputs/nbhd_sketch_tables/{acc}_long.csv")
 
 rule fastp:
     input:
@@ -269,7 +269,7 @@ rule sourmash_sketch_species_genomes:
 
 rule convert_signature_to_csv:
     input: 'outputs/nbhd_sigs/{sample}_{acc}.sig'
-    output: 'outputs/nbhd_sigs/{sample}_r{radius}_{acc}.csv'
+    output: 'outputs/nbhd_sigs/{sample}_{acc}.csv'
     conda: 'envs/sourmash.yml'
     threads: 1
     benchmark: "benchmarks/{sample}_{acc}_sketch_to_csv.tsv"
