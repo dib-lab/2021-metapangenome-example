@@ -1,3 +1,8 @@
+import csv
+import sys
+import urllib.request
+import pdb
+
 SAMPLES = ['HSM67VF9', 'HSM67VFD', 'HSM67VFJ', 'HSM6XRQB',
            'HSM6XRQI', 'HSM6XRQK', 'HSM6XRQM', 'HSM6XRQO',
            'HSM7CYY7', 'HSM7CYY9', 'HSM7CYYB', 'HSM7CYYD']
@@ -170,30 +175,109 @@ checkpoint gather_to_sgc_queries:
     threads: 1
     script: "scripts/gather_gtdb_to_sgc_queries.R"
 
-rule download_sgc_query_genomes:
-    input: 
-        gather_grist = "outputs/genbank/gather_gtdb-rs202-genomic.x.genbank.gather.csv",
-        conf = "conf/genome-grist-conf.yml"
-    output: "genbank_genomes/{acc}_genomic.fna.gz"
-    conda: "envs/genome-grist.yml"
+#rule download_sgc_query_genomes:
+#    input: 
+#        gather_grist = "outputs/genbank/gather_gtdb-rs202-genomic.x.genbank.gather.csv",
+#        conf = "conf/genome-grist-conf.yml"
+#    output: "genbank_genomes/genome-grist-done.txt"
+#    conda: "envs/genome-grist.yml"
+#    resources:
+#        mem_mb = 8000
+#    threads: 1
+#    shell:'''
+#    genome-grist run {input.conf} --until make_sgc_conf --nolock
+#    touch {output}
+#    '''
+#    
+#rule touch_sgc_query_genomes:
+#    input: "genbank_genomes/genome-grist-done.txt"
+#    output: "genbank_genomes/{acc}_genomic.fna.gz"
+#    resources:
+#        mem_mb = 500
+#    threads: 1
+#    shell:'''
+#    ls {output}
+#    '''
+
+rule make_genome_info_csv:
+    output:
+        csvfile = 'outputs/genbank_genomes/{acc}.info.csv'
+    conda: "envs/genbank_genomes.yml"
     resources:
         mem_mb = 8000
     threads: 1
-    shell:'''
-    genome-grist run {input.conf} --until make_sgc_conf --nolock
-    '''
-    
+    shell: """
+        python scripts/genbank_genomes.py {wildcards.acc} \
+            --output {output.csvfile}
+    """
+
+# combined info.csv
+#rule make_combined_info_csv:
+#    input:
+#        Checkpoint_GatherResults('outputs/genbank_genomes/{acc}.info.csv')
+#    output:
+#        genomes_info_csv = "outputs/genbank/gather_gtdb-rs202-genomic.genomes.info.csv",
+#    conda: "envs/genome-grist.yml"
+#    resources:
+#        mem_mb = 8000
+#    threads: 1
+#    shell: """
+#        python scripts/combine_csvs.py {input} > {output}
+#    """
+
+# download actual genomes!
+rule download_matching_genome_wc:
+    input:
+        csvfile = ancient('outputs/genbank_genomes/{acc}.info.csv')
+    output:
+        genome = "outputs/genbank_genomes/{acc}_genomic.fna.gz"
+    resources:
+        mem_mb = 500
+    threads: 1
+    run:
+        with open(input.csvfile, 'rt') as infp:
+            r = csv.DictReader(infp)
+            rows = list(r)
+            assert len(rows) == 1
+            row = rows[0]
+            acc = row['acc']
+            assert wildcards.acc.startswith(acc)
+            url = row['genome_url']
+            name = row['ncbi_tax_name']
+
+            print(f"downloading genome for acc {acc}/{name} from NCBI...",
+                file=sys.stderr)
+            with open(output.genome, 'wb') as outfp:
+                with urllib.request.urlopen(url) as response:
+                    content = response.read()
+                    outfp.write(content)
+                    print(f"...wrote {len(content)} bytes to {output.genome}",
+                        file=sys.stderr)
+
+   
 rule make_sgc_genome_query_conf_files:
     input:
-        csv = "outputs/genbank/gather_gtdb-rs202-genomic.x.genbank.gather.csv",
-        queries = ancient(Checkpoint_GatherResults("genbank_genomes/{acc}_genomic.fna.gz")),
+        queries = Checkpoint_GatherResults("outputs/genbank_genomes/{acc}_genomic.fna.gz"),
     output:
         conf = "outputs/sgc_conf/{sample}_k31_r1_conf.yml"
     resources:
         mem_mb = 500
     threads: 1
     run:
-        query_list = "\n- ".join(input.queries)
+        # something weird is happening here where snakemake solves the inputs correctly, but 
+        # "queries" ends up being the gather csv file. So...parse the CSV file for accession
+        # numbers. Sigh.
+        gather_csv = input[0]
+        genome_accs = []
+        with open(gather_csv, 'rt') as fp:
+            r = csv.DictReader(fp)
+            for row in r:
+                acc = row['name'].split(' ')[0]
+                acc = "outputs/genbank_genomes/" + acc + "_genomic.fna.gz"
+                genome_accs.append(acc)
+        
+        query_list = "\n- ".join(genome_accs)
+        #query_list = "\n- ".join(input.queries)
         with open(output.conf, 'wt') as fp:
            print(f"""\
 catlas_base: {wildcards.sample}
@@ -208,7 +292,7 @@ search:
 
 rule spacegraphcats:
     input: 
-        queries = ancient(Checkpoint_GatherResults("genbank_genomes/{acc}_genomic.fna.gz")), 
+        #queries = ancient(Checkpoint_GatherResults("outputs/genbank_genomes/{acc}_genomic.fna.gz")), 
         conf = ancient("outputs/sgc_conf/{sample}_k31_r1_conf.yml"),
         reads = "outputs/abundtrim/{sample}.abundtrim.fq.gz"
     output:
@@ -218,6 +302,7 @@ rule spacegraphcats:
     conda: "envs/spacegraphcats.yml"
     resources:
         mem_mb = 300000
+    benchmark: "benchmarks/{sample}_sgc.tsv"
     threads: 1
     shell:'''
     python -m spacegraphcats run {input.conf} extract_contigs extract_reads --nolock --outdir={params.outdir} --rerun-incomplete 
@@ -236,16 +321,16 @@ rule touch_spacegraphcats:
 
 rule orpheum_translate_reads:
     input: 
-        ref="inputs/orpheum_index/{orpheum_db}.{alphabet}-k{ksize}.nodegraph",
-        fasta="outputs/sgc_genome_queries/{sample}_k31_r1_search_oh0/{genome}.fna.cdbg_ids.reads.gz"
+        ref="inputs/orpheum_index/gtdb-rs202.protein-k10.nodegraph",
+        fasta="outputs/sgc_genome_queries/{sample}_k31_r1_search_oh0/{acc}_genomic.fna.gz.cdbg_ids.reads.gz"
     output:
-        pep="outputs/orpheum/{sample}_{acc}.coding.faa",
-        nuc="outputs/orpheum/{sample}_{acc}.nuc_coding.fna",
-        nuc_noncoding="outputs/orpheum/{sample}_{acc}.nuc_noncoding.fna",
-        csv="outputs/orpheum/{sample}_{acc}.coding_scores.csv",
-        json="outputs/orpheum/{sample}_{acc}.summary.json"
+        pep="outputs/orpheum/{sample}-{acc}.coding.faa",
+        nuc="outputs/orpheum/{sample}-{acc}.nuc_coding.fna",
+        nuc_noncoding="outputs/orpheum/{sample}-{acc}.nuc_noncoding.fna",
+        csv="outputs/orpheum/{sample}-{acc}.coding_scores.csv",
+        json="outputs/orpheum/{sample}-{acc}.summary.json"
     conda: "envs/orpheum.yml"
-    benchmark: "benchmarks/orpheum-translate-{sample}-{acc}.txt"
+    benchmark: "benchmarks/{sample}-{acc}_orpheum_translate.txt"
     resources:  
         mem_mb=100000,
         tmpdir=TMPDIR
@@ -255,24 +340,24 @@ rule orpheum_translate_reads:
     '''
 
 rule sourmash_sketch_species_genomes:
-    input: "outputs/orpheum/{sample}_{acc}.coding.faa"
-    output: 'outputs/nbhd_sigs/{sample}_{acc}.sig' 
+    input: "outputs/orpheum/{sample}-{acc}.coding.faa"
+    output: 'outputs/nbhd_sigs/{sample}-{acc}.sig' 
     conda: 'envs/sourmash.yml'
     resources:
         mem_mb = 4000,
         tmpdir = TMPDIR
     threads: 1
-    benchmark: "benchmarks/{sample}_{acc}_sketch.tsv"
+    benchmark: "benchmarks/{sample}-{acc}_sketch.tsv"
     shell:"""
     sourmash sketch protein -p k=10,scaled=100,protein -o {output} --name {wildcards.acc} {input}
     """
 
 rule convert_signature_to_csv:
-    input: 'outputs/nbhd_sigs/{sample}_{acc}.sig'
-    output: 'outputs/nbhd_sigs/{sample}_{acc}.csv'
+    input: 'outputs/nbhd_sigs/{sample}-{acc}.sig'
+    output: 'outputs/nbhd_sigs/{sample}-{acc}.csv'
     conda: 'envs/sourmash.yml'
     threads: 1
-    benchmark: "benchmarks/{sample}_{acc}_sketch_to_csv.tsv"
+    benchmark: "benchmarks/{sample}-{acc}_sketch_to_csv.tsv"
     resources:
         mem_mb=2000,
         tmpdir = TMPDIR
@@ -282,9 +367,9 @@ rule convert_signature_to_csv:
 
 rule make_hash_table_long:
     input: 
-        expand("outputs/nbhd_sigs/{sample}_{{acc}}.csv", sample = SAMPLES)
+        expand("outputs/nbhd_sigs/{sample}-{{acc}}.csv", sample = SAMPLES)
     output: csv = "outputs/nbhd_sketch_tables/{acc}_long.csv"
-    conda: 'envs/r.yml'
+    conda: 'envs/tidy.yml'
     threads: 1
     benchmark: "benchmarks/sourmash_sketch_tables_long/{acc}.txt"
     resources:
