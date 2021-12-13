@@ -47,7 +47,8 @@ class Checkpoint_GatherResults:
 
 rule all:
     input: 
-        Checkpoint_GatherResults("outputs/nbhd_sketch_tables/{acc}_long.csv")
+        Checkpoint_GatherResults("outputs/nbhd_sketch_tables/{acc}_long.csv"),
+        Checkpoint_GatherResults(expand("outputs/nbhd_gather/{sample}-{{acc}}_gather_gtdb-rs202-genomic.csv", sample = SAMPLES))
 
 rule fastp:
     input:
@@ -301,11 +302,11 @@ rule spacegraphcats:
     params: outdir = "outputs/sgc_genome_queries"
     conda: "envs/spacegraphcats.yml"
     resources:
-        mem_mb = 300000
+        mem_mb = 20000
     benchmark: "benchmarks/{sample}_sgc.tsv"
     threads: 1
     shell:'''
-    python -m spacegraphcats run {input.conf} extract_contigs extract_reads --nolock --outdir={params.outdir} --rerun-incomplete 
+    python -m spacegraphcats run {input.conf} extract_reads --nolock --outdir={params.outdir} --rerun-incomplete 
     '''
     
 rule touch_spacegraphcats:
@@ -317,6 +318,37 @@ rule touch_spacegraphcats:
     threads: 1
     shell:'''
     ls {output}
+    '''
+
+rule sourmash_sketch_spacegraphcats_nbhds:
+    input: "outputs/sgc_genome_queries/{sample}_k31_r1_search_oh0/{acc}_genomic.fna.gz.cdbg_ids.reads.gz"
+    output: 'outputs/nbhd_sigs/{sample}-{acc}-dna-k31.sig' 
+    conda: 'envs/sourmash.yml'
+    resources:
+        mem_mb = 4000,
+        tmpdir = TMPDIR
+    threads: 1
+    benchmark: "benchmarks/{sample}-{acc}_sketch_dna-k31.tsv"
+    shell:"""
+    sourmash sketch dna -p k=31,scaled=2000 -o {output} --name {wildcards.acc} {input}
+    """
+
+rule sourmash_gather_spacegraphcats_nbhds:
+    input:
+        sig = 'outputs/nbhd_sigs/{sample}-{acc}-dna-k31.sig',
+        db="/group/ctbrowngrp/gtdb/databases/ctb/gtdb-rs202.genomic.k31.sbt.zip",
+    output: 
+        csv="outputs/nbhd_gather/{sample}-{acc}_gather_gtdb-rs202-genomic.csv",
+        matches="outputs/nbhd_gather/{sample}-{acc}_gather_gtdb-rs202-genomic.matches",
+        un="outputs/nbhd_gather/{sample}-{acc}_gather_gtdb-rs202-genomic.un"
+    conda: 'envs/sourmash.yml'
+    resources:
+        mem_mb = 16000,
+        tmpdir = TMPDIR
+    threads: 1
+    benchmark: "benchmarks/{sample}-{acc}_gather_nbhd.tsv"
+    shell:'''
+    sourmash gather -o {output.csv} --threshold-bp 0 --save-matches {output.matches} --output-unassigned {output.un} --scaled 2000 -k 31 {input.sig} {input.db} 
     '''
 
 rule orpheum_translate_reads:
@@ -332,7 +364,7 @@ rule orpheum_translate_reads:
     conda: "envs/orpheum.yml"
     benchmark: "benchmarks/{sample}-{acc}_orpheum_translate.txt"
     resources:  
-        mem_mb=100000,
+        mem_mb=150000,
         tmpdir=TMPDIR
     threads: 1
     shell:'''
