@@ -45,10 +45,50 @@ class Checkpoint_GatherResults:
         p = expand(self.pattern, acc=genome_accs, **w)
         return p
 
+
+class Checkpoint_AccToDbs:
+    """
+    Define a class a la genome-grist to simplify file specification
+    from checkpoint (e.g. solve for {acc} wildcard). This approach
+    is documented at this url:
+    http://ivory.idyll.org/blog/2021-snakemake-checkpoints.html
+    """
+    def __init__(self, pattern):
+        self.pattern = pattern
+
+    def get_acc_dbs(self):
+        acc_db_csv = f'outputs/genbank/gather_gtdb-rs202-genomic.x.dbs.csv'
+        assert os.path.exists(acc_db_csv)
+
+        acc_dbs = []
+        with open(acc_db_csv, 'rt') as fp:
+           r = csv.DictReader(fp)
+           for row in r:
+               acc = row['accession']
+               db = row['species']
+               acc_db = acc + "-" + db
+               acc_dbs.append(acc_db)
+
+        return acc_dbs
+
+    def __call__(self, w):
+        global checkpoints
+
+        # wait for the results of 'query_to_species_db';
+        # this will trigger exception until that rule has been run.
+        checkpoints.query_to_species_db.get(**w)
+
+        # parse accessions in gather output file
+        genome_acc_dbs = self.get_acc_dbs()
+
+        p = expand(self.pattern, acc_db=genome_acc_dbs, **w)
+        return p
+
 rule all:
     input: 
         Checkpoint_GatherResults("outputs/nbhd_sketch_tables/{acc}_long.csv"),
-        Checkpoint_GatherResults(expand("outputs/nbhd_gather/{sample}-{{acc}}_gather_gtdb-rs202-genomic.csv", sample = SAMPLES))
+        #Checkpoint_GatherResults(expand("outputs/nbhd_gather/{sample}-{{acc}}_gather_gtdb-rs202-genomic.csv", sample = SAMPLES)),
+        Checkpoint_AccToDbs(expand("outputs/orpheum_species/{sample}-{{acc_db}}.coding.faa", sample = SAMPLES))
 
 rule fastp:
     input:
@@ -168,6 +208,8 @@ checkpoint gather_to_sgc_queries:
     input:  
         gather=expand("outputs/sample_gather/{sample}_gather_gtdb-rs202-genomic.csv", sample = SAMPLES),
     output: 
+        lineages = "inputs/gtdb-rs202.taxonomy.v2.csv",
+        hmp_metadata = "inputs/hmp2_metadata.csv",
         gather_grist = "outputs/genbank/gather_gtdb-rs202-genomic.x.genbank.gather.csv",
         pdf="figures/common_species_breakdown.pdf"
     conda: "envs/tidy.yml"
@@ -391,7 +433,7 @@ rule convert_signature_to_csv:
     threads: 1
     benchmark: "benchmarks/{sample}-{acc}_sketch_to_csv.tsv"
     resources:
-        mem_mb=2000,
+        mem_mb=4000,
         tmpdir = TMPDIR
     shell:'''
     python scripts/sig_to_csv.py {input} {output}
@@ -411,3 +453,41 @@ rule make_hash_table_long:
     
 # rule pagoo
 
+#######################################
+## Species-specific databases
+#######################################
+
+
+checkpoint query_to_species_db:
+    input:
+        gather = "outputs/genbank/gather_gtdb-rs202-genomic.x.genbank.gather.csv",
+        lineages = "inputs/gtdb-rs202.taxonomy.v2.csv",
+    output: 
+        csv = 'outputs/genbank/gather_gtdb-rs202-genomic.x.dbs.csv'
+    conda: "envs/tidy.yml"
+    threads: 1
+    benchmark: "benchmarks/query_to_species_db.tsv"
+    resources:
+        mem_mb=4000,
+        tmpdir = TMPDIR
+    script: "scripts/query_to_species_db.R"
+
+rule orpheum_translate_reads_species_db:
+    input: 
+        ref="inputs/orpheum_index/gtdb-rs202.{species}.protein-k10.nodegraph",
+        fasta="outputs/sgc_genome_queries/{sample}_k31_r1_search_oh0/{acc}_genomic.fna.gz.cdbg_ids.reads.gz"
+    output:
+        pep="outputs/orpheum_species/{sample}-{acc}-{species}.coding.faa",
+        nuc="outputs/orpheum_species/{sample}-{acc}-{species}.nuc_coding.fna",
+        nuc_noncoding="outputs/orpheum_species/{sample}-{acc}-{species}.nuc_noncoding.fna",
+        csv="outputs/orpheum_species/{sample}-{acc}-{species}.coding_scores.csv",
+        json="outputs/orpheum_species/{sample}-{acc}-{species}.summary.json"
+    conda: "envs/orpheum.yml"
+    benchmark: "benchmarks/{sample}-{acc}-{species}_orpheum_species_translate.txt"
+    resources:  
+        mem_mb=5000,
+        tmpdir=TMPDIR
+    threads: 1
+    shell:'''
+    orpheum translate --jaccard-threshold 0.39 --alphabet protein --peptide-ksize 10  --peptides-are-bloom-filter --noncoding-nucleotide-fasta {output.nuc_noncoding} --coding-nucleotide-fasta {output.nuc} --csv {output.csv} --json-summary {output.json} {input.ref} {input.fasta} > {output.pep}
+    '''
