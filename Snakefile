@@ -534,7 +534,7 @@ rule make_hash_table_long_species:
     
 
 rule install_pagoo:
-    output: "outputs/pagoo_species/pagoo.txt"
+    output: pagoo = "outputs/pagoo_species/pagoo.txt"
     conda: 'envs/pagoo.yml'
     threads: 1
     resources:

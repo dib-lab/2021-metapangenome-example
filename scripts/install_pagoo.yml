@@ -1,0 +1,3 @@
+install.packages("pagoo")
+library(pagoo)
+file.create(snakemake@output[['pagoo']])
