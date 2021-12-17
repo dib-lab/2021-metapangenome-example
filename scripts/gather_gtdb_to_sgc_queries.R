@@ -28,8 +28,8 @@ h4017 <- hmp_metadata %>%
                         'HSM6XRQI', 'HSM6XRQK', 'HSM6XRQM', 'HSM6XRQO',
                         'HSM7CYY7', 'HSM7CYY9', 'HSM7CYYB', 'HSM7CYYD'))
 
-gather_results <- unlist(snakemake@input[['gather']]) %>%
-#gather_results <- Sys.glob("outputs/sample_gather/*genomic.csv") %>%
+#gather_results <- unlist(snakemake@input[['gather']]) %>%
+gather_results <- Sys.glob("outputs/sample_gather/*genomic.csv") %>%
   set_names() %>%
   map_dfr(read_csv, col_types = c("dddddlllcccddddcccd"), .id = "sample") %>%
   mutate(sample = gsub("outputs/sample_gather/", "", sample)) %>%
@@ -43,7 +43,9 @@ gather_results <- left_join(gather_results, gtdb_lineages, by = c("accession" = 
 
 abx_plt <- ggplot(h4017, aes(x = week_num, y = antibiotics)) +
   geom_point() +
-  theme_minimal()
+  theme_minimal() +
+  theme(axis.title.x = element_blank())+
+  labs(x = "week number")
 
 # library(ggthemes)
 # common_phyla <- gather_results %>%
@@ -82,16 +84,31 @@ sgc_species <- gather_results %>%
   summarize(sum_f_unique_to_query = sum(f_unique_to_query)) %>%
   filter(sum_f_unique_to_query > 0.1)
 
-sgc_plt <- ggplot(gather_results %>%
-                       mutate(species2 = ifelse(species %in% sgc_species$species, species, "other")),
+gather_results2 <- gather_results %>%
+  mutate(species2 = ifelse(species %in% sgc_species$species, species, "other")) %>%
+  mutate(species2 = gsub("s__", "", species2))
+gather_results2$species2 <- factor(gather_results2$species2, 
+                                   levels =c('other', 
+                                             'Bacteroides fragilis',
+                                             'Bacteroides uniformis',
+                                             'Clostridium_Q symbiosum',
+                                             'Enterocloster bolteae',
+                                             'Parabacteroides distasonis',
+                                             'Parabacteroides merdae',
+                                             'Phocaeicola vulgatus',    
+                                             'Roseburia intestinalis', 
+                                             'Ruminococcus_B gnavus'))
+sgc_plt <- ggplot(gather_results2,
                      aes(x = week_num, y = f_unique_to_query, fill = species2)) +
   geom_col() +
+  labs(x = "week number", y = "fraction of metagenome", fill = "species")+
   theme_minimal() +
+  theme(legend.text = element_text(face = "italic")) +
   ylim(0, 1) + 
   scale_fill_brewer(palette = "Paired")
 
-#pdf("figures/common_species_breakdown.pdf", width = 6, height = 3)
-pdf(snakemake@output[['pdf']], width = 6, height = 3)
+pdf("figures/common_species_breakdown.pdf", width = 6, height = 3)
+#pdf(snakemake@output[['pdf']], width = 6, height = 3)
 abx_plt %>% insert_bottom(sgc_plt)
 dev.off()
 
