@@ -87,8 +87,10 @@ class Checkpoint_AccToDbs:
 rule all:
     input: 
         Checkpoint_GatherResults("outputs/nbhd_sketch_tables/{acc}_long.csv"),
+        Checkpoint_AccToDbs("outputs/nbhd_sketch_tables_species/{acc_db}_long.csv"),
         #Checkpoint_GatherResults(expand("outputs/nbhd_gather/{sample}-{{acc}}_gather_gtdb-rs202-genomic.csv", sample = SAMPLES)),
-        Checkpoint_AccToDbs(expand("outputs/orpheum_species/{sample}-{{acc_db}}.coding.faa", sample = SAMPLES))
+        expand("outputs/orpheum_compare/{sample}_comp_containment.csv", sample = SAMPLES),
+        expand("outputs/orpheum_compare/{sample}_comp.csv", sample = SAMPLES)
 
 rule fastp:
     input:
@@ -485,9 +487,88 @@ rule orpheum_translate_reads_species_db:
     conda: "envs/orpheum.yml"
     benchmark: "benchmarks/{sample}-{acc}-{species}_orpheum_species_translate.txt"
     resources:  
-        mem_mb=5000,
+        mem_mb=15000,
         tmpdir=TMPDIR
     threads: 1
     shell:'''
     orpheum translate --jaccard-threshold 0.39 --alphabet protein --peptide-ksize 10  --peptides-are-bloom-filter --noncoding-nucleotide-fasta {output.nuc_noncoding} --coding-nucleotide-fasta {output.nuc} --csv {output.csv} --json-summary {output.json} {input.ref} {input.fasta} > {output.pep}
+    '''
+
+rule sourmash_sketch_species_genomes_species:
+    input: "outputs/orpheum_species/{sample}-{acc_db}.coding.faa"
+    output: 'outputs/nbhd_sigs_species/{sample}-{acc_db}.sig' 
+    conda: 'envs/sourmash.yml'
+    resources:
+        mem_mb = 4000,
+        tmpdir = TMPDIR
+    threads: 1
+    benchmark: "benchmarks/{sample}-{acc_db}_sketch.tsv"
+    shell:"""
+    sourmash sketch protein -p k=10,scaled=100,protein -o {output} --name {wildcards.acc_db} {input}
+    """
+
+rule convert_signature_to_csv_species:
+    input: 'outputs/nbhd_sigs_species/{sample}-{acc_db}.sig'
+    output: 'outputs/nbhd_sigs_species/{sample}-{acc_db}.csv'
+    conda: 'envs/sourmash.yml'
+    threads: 1
+    benchmark: "benchmarks/{sample}-{acc_db}_sketch_to_csv.tsv"
+    resources:
+        mem_mb=4000,
+        tmpdir = TMPDIR
+    shell:'''
+    python scripts/sig_to_csv.py {input} {output}
+    '''
+
+rule make_hash_table_long_species:
+    input: 
+        expand("outputs/nbhd_sigs_species/{sample}-{{acc_db}}.csv", sample = SAMPLES)
+    output: csv = "outputs/nbhd_sketch_tables_species/{acc_db}_long.csv"
+    conda: 'envs/tidy.yml'
+    threads: 1
+    benchmark: "benchmarks/sourmash_sketch_tables_long/{acc_db}.txt"
+    resources:
+        mem_mb=64000,
+        tmpdir = TMPDIR
+    script: "scripts/sketch_csv_to_long.R"
+    
+# rule pagoo
+
+#######################################
+######################################################
+## Compare species-level db and gtdb-level db results
+######################################################
+
+rule sourmash_compare_orpheum_outputs:
+    input:
+        Checkpoint_AccToDbs("outputs/nbhd_sigs_species/{{sample}}-{acc_db}.sig"),
+        Checkpoint_GatherResults('outputs/nbhd_sigs/{{sample}}-{acc}.sig') 
+    output: 
+        comp = "outputs/orpheum_compare/{sample}_comp",
+        csv = "outputs/orpheum_compare/{sample}_comp.csv"
+    conda: "envs/sourmash.yml"
+    benchmark: "benchmarks/{sample}_sourmash_comp_orpheum_outputs.txt"
+    resources:  
+        mem_mb=15000,
+        tmpdir=TMPDIR
+    threads: 1
+    shell:'''
+    sourmash compare -o {output.comp} --csv {output.csv} {input}
+    '''
+
+rule sourmash_compare_orpheum_outputs_max:
+    input:
+        Checkpoint_AccToDbs("outputs/nbhd_sigs_species/{{sample}}-{acc_db}.sig"),
+        Checkpoint_GatherResults('outputs/nbhd_sigs/{{sample}}-{acc}.sig') 
+    output: 
+        comp = "outputs/orpheum_compare/{sample}_comp_containment",
+        csv = "outputs/orpheum_compare/{sample}_comp_containment.csv"
+    conda: "envs/sourmash.yml"
+    benchmark: "benchmarks/{sample}_sourmash_comp_containment_orpheum_outputs.txt"
+    resources:  
+        mem_mb=15000,
+        tmpdir=TMPDIR
+    threads: 1
+    shell:'''
+    sourmash compare --max-containment -o {output.comp} --csv {output.csv} {input}
     '''
