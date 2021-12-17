@@ -532,9 +532,29 @@ rule make_hash_table_long_species:
         tmpdir = TMPDIR
     script: "scripts/sketch_csv_to_long.R"
     
-# rule pagoo
 
-#######################################
+rule install_pagoo:
+    output: "outputs/pagoo_species/pagoo.txt"
+    conda: 'envs/pagoo.yml'
+    threads: 1
+    resources:
+        mem_mb=1000,
+        tmpdir = TMPDIR
+    script: "scripts/install_pagoo.R"
+
+rule species_pagoo:
+    input: csv = "outputs/nbhd_sketch_tables_species/{acc_db}_long.csv"
+    output: 
+        pca = "outputs/pagoo_species/{acc_db}_pca.pdf",
+        binmap = "outputs/pagoo_species/{acc_db}_binmap.pdf"
+    conda: 'envs/pagoo.yml'
+    threads: 1
+    benchmark: "benchmarks/pagoo_{acc_db}.txt"
+    resources:
+        mem_mb=8000,
+        tmpdir = TMPDIR
+    script: "scripts/pagoo_plt.R"
+    
 ######################################################
 ## Compare species-level db and gtdb-level db results
 ######################################################
