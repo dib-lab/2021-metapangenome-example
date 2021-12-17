@@ -27,7 +27,7 @@ read_long_sketch_table_as_pagoo <- function(path, threshold = 2000){
 species_string1 <- snakemake@wildcards[['acc_db']]
 species_string2 <- gsub("-", ".", species_string1)
 species_string3 <- gsub(".*s__", "", species_string2)
-species_string3 <- gsyb("_", " ", species_string3)
+species_string3 <- gsub("_", " ", species_string3)
 
 pg <- read_long_sketch_table_as_pagoo(snakemake@input[['csv']], threshold = 0)
 

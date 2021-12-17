@@ -87,7 +87,7 @@ class Checkpoint_AccToDbs:
 rule all:
     input: 
         Checkpoint_GatherResults("outputs/nbhd_sketch_tables/{acc}_long.csv"),
-        Checkpoint_AccToDbs("outputs/nbhd_sketch_tables_species/{acc_db}_long.csv"),
+        Checkpoint_AccToDbs("outputs/pagoo_species/{acc_db}_binmap.pdf"),
         #Checkpoint_GatherResults(expand("outputs/nbhd_gather/{sample}-{{acc}}_gather_gtdb-rs202-genomic.csv", sample = SAMPLES)),
         expand("outputs/orpheum_compare/{sample}_comp_containment.csv", sample = SAMPLES),
         expand("outputs/orpheum_compare/{sample}_comp.csv", sample = SAMPLES)
@@ -543,7 +543,9 @@ rule install_pagoo:
     script: "scripts/install_pagoo.R"
 
 rule species_pagoo:
-    input: csv = "outputs/nbhd_sketch_tables_species/{acc_db}_long.csv"
+    input: 
+        csv = "outputs/nbhd_sketch_tables_species/{acc_db}_long.csv",
+        pagoo = "outputs/pagoo_species/pagoo.txt"
     output: 
         pca = "outputs/pagoo_species/{acc_db}_pca.pdf",
         binmap = "outputs/pagoo_species/{acc_db}_binmap.pdf"
