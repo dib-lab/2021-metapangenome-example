@@ -40,27 +40,21 @@ gather_results <- left_join(gather_results, gtdb_lineages, by = c("accession" = 
   left_join(h4017, by = c("sample" = "data_id"))
 
 # plot --------------------------------------------------------------------
-
-abx_plt <- ggplot(h4017, aes(x = week_num, y = antibiotics)) +
-  geom_point() +
+h4017$antibiotic <- c("ciprofloxacin", "ciprofloxacin", "ciprofloxacin",
+                      "none", "none", "metronidazole", "metronidazole",
+                      "metronidazole", "none", "none", "none", "unknown")
+h4017$antibiotic <- factor(h4017$antibiotic, levels =  c("ciprofloxacin", "metronidazole", "unknown", "none"))
+abx_plt <- ggplot(h4017, aes(x = week_num, y = diagnosis, shape = antibiotic)) +
+  geom_point(size = 2.5) +
   theme_minimal() +
-  theme(axis.title.x = element_blank())+
-  labs(x = "week number")
-
-# library(ggthemes)
-# common_phyla <- gather_results %>%
-#   group_by(phylum) %>%
-#   tally() %>%
-#   filter(n >= 10)
-# phylum_plt <- ggplot(gather_results %>%
-#          mutate(phylum2 = ifelse(phylum %in% common_phyla$phylum, phylum, "other")),
-#        aes(x = week_num, y = f_unique_to_query, fill = phylum2)) +
-#   geom_col() +
-#   theme_minimal() + 
-#   ylim(0, 1) +
-#   scale_fill_tableau(palette = "Tableau 20")
-# 
-# abx_plt %>% insert_bottom(phylum_plt)
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_text(size = 8),
+        axis.text = element_blank(),
+        legend.title = element_text(size = 8),
+        legend.text = element_text(size = 7),
+        panel.grid = element_blank())+
+  labs(x = "week number", y = "antibiotic") 
+abx_plt
 
 # decide which genome to query with ---------------------------------------
 
@@ -82,7 +76,7 @@ sgc_species <- gather_results %>%
   filter(species %in% common_species$species) %>%
   group_by(species) %>%
   summarize(sum_f_unique_to_query = sum(f_unique_to_query)) %>%
-  filter(sum_f_unique_to_query > 0.1)
+  filter(sum_f_unique_to_query > 0.2)
 
 gather_results2 <- gather_results %>%
   mutate(species2 = ifelse(species %in% sgc_species$species, species, "other")) %>%
@@ -91,25 +85,31 @@ gather_results2$species2 <- factor(gather_results2$species2,
                                    levels =c('other', 
                                              'Bacteroides fragilis',
                                              'Bacteroides uniformis',
-                                             'Clostridium_Q symbiosum',
                                              'Enterocloster bolteae',
                                              'Parabacteroides distasonis',
                                              'Parabacteroides merdae',
-                                             'Phocaeicola vulgatus',    
-                                             'Roseburia intestinalis', 
-                                             'Ruminococcus_B gnavus'))
+                                             'Phocaeicola vulgatus'))
+gather_results2 <- left_join(gather_results2, h4017)
 sgc_plt <- ggplot(gather_results2,
                      aes(x = week_num, y = f_unique_to_query, fill = species2)) +
   geom_col() +
+  geom_point(aes(x = week_num, y = 1, shape = antibiotic)) +
   labs(x = "week number", y = "fraction of metagenome", fill = "species")+
   theme_minimal() +
-  theme(legend.text = element_text(face = "italic")) +
+  theme(legend.title = element_text(size = 8),
+        legend.text = element_text(size = 7, face = "italic"),
+        axis.title = element_text(size = 8),
+        axis.text = element_text(size = 7)) +
   ylim(0, 1) + 
-  scale_fill_brewer(palette = "Paired")
+  scale_fill_manual(values = c("#999999", "#E69F00", "#56B4E9", "#F0E442", "#009E73",
+                               "#CC79A7", "#0072B2")) +
+  guides(fill = guide_legend(override.aes = list(shape = NA)))
+sgc_plt
 
-pdf("figures/common_species_breakdown.pdf", width = 6, height = 3)
+pdf("figures/common_species_breakdown2.pdf", width = 6, height = 3.6)
 #pdf(snakemake@output[['pdf']], width = 6, height = 3)
-abx_plt %>% insert_bottom(sgc_plt)
+#abx_plt %>% insert_bottom(sgc_plt, height = 5)
+sgc_plt
 dev.off()
 
 # output sgc queries as gather file ---------------------------------------
