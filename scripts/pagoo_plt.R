@@ -1,6 +1,7 @@
 library(pagoo)
 library(readr)
 library(ggplot2)
+library(dplyr)
 
 read_long_sketch_table_as_pagoo <- function(path, threshold = 2000){
   sketch_table <- read_csv(path)
