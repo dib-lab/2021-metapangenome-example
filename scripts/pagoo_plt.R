@@ -24,13 +24,16 @@ read_long_sketch_table_as_pagoo <- function(path, threshold = 2000){
   return(p)
 }
 
+#list.files("outputs/nbhd_sketch_tables_species/")
+#species_string1 <- ""
 species_string1 <- snakemake@wildcards[['acc_db']]
 species_string2 <- gsub("-", ".", species_string1)
 species_string3 <- gsub(".*s__", "", species_string2)
 species_string3 <- gsyb("_", " ", species_string3)
 
 pg <- read_long_sketch_table_as_pagoo(snakemake@input[['csv']], threshold = 0)
-
+#pg <- read_long_sketch_table_as_pagoo(paste0("outputs/nbhd_sketch_tables_species/", 
+#                                             species_string1, "_long.csv"), threshold = 0)
 pg_organisms <- gsub(paste0(".", species_string2), "", as.character(pg$organisms$org))
 
 destfile <- "inputs/hmp2_metadata.csv"
@@ -39,6 +42,15 @@ if (!file.exists(destfile)) {
   download.file(url, destfile, method="auto")
 }
 hmp_metadata <- read_csv(destfile)
+
+# serology data_type contains information on abx types
+# tmp <- hmp_metadata %>%
+#   select(participant_id = "Participant ID", data_id = "External ID", data_type,
+#          week_num, diagnosis, antibiotics = "Antibiotics",
+#          fecalcal, metronidazole = "Flagyl (Metronidazole)",
+#          cipro = "Cipro (Ciprofloxin)", rifaxamin = "Xifaxin (rifaxamin)",
+#          levaquin = Levaquin, other_abx = "Other Antibiotic:") %>%
+#   filter(participant_id =="H4017")
 
 h4017 <- hmp_metadata %>%
   select(data_id = "External ID", data_type,
@@ -54,7 +66,7 @@ h4017 <- h4017 %>%
 
 pg$add_metadata(map = "org", as.data.frame(h4017))
 
-pdf(snakemake@output[['pca']], )
+pdf(snakemake@output[['pca']], height = 3, width = 4)
 pg$gg_pca() +
   geom_point(aes(color = antibiotics)) +
   theme_minimal() +
@@ -78,6 +90,7 @@ bm$value_abx <- paste0(bm$value, "_", bm$antibiotics)
 bm$value_abx <- factor(bm$value_abx, levels = c("0_No", "1_No", "0_Yes",  "1_Yes"))
 colnames(bm)[which(colnames(bm) == 'variable')] <- "Organism"
 
+#pdf(paste0("outputs/pagoo_species/", species_string1, "_binmap.pdf"), height = 3, width = 4)
 pdf(snakemake@output[['binmap']], height = 3, width = 4)
 ggplot(bm, aes(Cluster, as.factor(week_num), fill=value_abx)) +
   geom_raster() +
@@ -89,25 +102,3 @@ ggplot(bm, aes(Cluster, as.factor(week_num), fill=value_abx)) +
   labs(x = "protein k-mer", y = "week number", fill = "presence\n& antibiotics",
        title = species_string3)
 dev.off()
-
-# Summary of pagoo results
-# Phocaeicola vulgatus
-# core genome is stable across abx administration, but set of genes disappears with second round of abx.
-# third round of abx wipes it out.
-# ignoring the week 37 sample:
-# pg$summary_stats
-# Category    Number
-# 1       Total     41005
-# 2        Core     12437
-# 3       Shell      8376
-# 4       Cloud     20192
-
-# Bacteroides uniformis also impacted by second round of antibiotics
-
-# clostridium_Q symbiosium is present during first ABX, but then disappears mostly
-
-# E. bolteae disturbance succession
-#*C. bolteae* is a member of the normal gut microbiota but is an opportunistic pathogen that exploits compromised intestinal barriers [@doi:10.1186/s12864-016-3152-x].
-#It is associated with disturbance succession and has increased gene expression during gut dysbiosis [@doi:10.1101/gr.138198.112; @doi:10.1038/s41586-019-1237-9].
-
-# Parabacteroides merdae blooms during second course of ABX, but is wiped out by the third
