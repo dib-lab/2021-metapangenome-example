@@ -90,7 +90,8 @@ rule all:
         Checkpoint_AccToDbs("outputs/pagoo_species/{acc_db}_binmap.pdf"),
         #Checkpoint_GatherResults(expand("outputs/nbhd_gather/{sample}-{{acc}}_gather_gtdb-rs202-genomic.csv", sample = SAMPLES)),
         expand("outputs/orpheum_compare/{sample}_comp_containment.csv", sample = SAMPLES),
-        expand("outputs/orpheum_compare/{sample}_comp.csv", sample = SAMPLES)
+        expand("outputs/orpheum_compare/{sample}_comp.csv", sample = SAMPLES),
+        Checkpoint_AccToDbs(expand("outputs/nbhd_species_gather/{sample}-{{acc_db}}_gather_gtdb-rs202-genomic.csv", sample = SAMPLES))
 
 rule fastp:
     input:
@@ -556,7 +557,39 @@ rule species_pagoo:
         mem_mb=8000,
         tmpdir = TMPDIR
     script: "scripts/pagoo_plt.R"
-    
+
+# confirm which *strains* are present in kaa-mers
+rule sourmash_sketch_species_genomes_species_dna:
+    input: "outputs/orpheum_species/{sample}-{acc_db}.nuc_coding.fna",
+    output: 'outputs/nbhd_sigs_species/{sample}-{acc_db}-dna-k51.sig' 
+    conda: 'envs/sourmash.yml'
+    resources:
+        mem_mb = 4000,
+        tmpdir = TMPDIR
+    threads: 1
+    benchmark: "benchmarks/{sample}-{acc_db}_sketch.tsv"
+    shell:"""
+    sourmash sketch dna -p k=51,scaled=2000 -o {output} --name {wildcards.acc_db} {input}
+    """
+
+rule sourmash_gather_orpheum_species:
+    input:
+        sig = 'outputs/nbhd_sigs_species/{sample}-{acc_db}-dna-k51.sig',
+        db="/group/ctbrowngrp/gtdb/databases/ctb/gtdb-rs202.genomic.k51.sbt.zip",
+    output: 
+        csv="outputs/nbhd_species_gather/{sample}-{acc_db}_gather_gtdb-rs202-genomic.csv",
+        matches="outputs/nbhd_species_gather/{sample}-{acc_db}_gather_gtdb-rs202-genomic.matches",
+        un="outputs/nbhd_species_gather/{sample}-{acc_db}_gather_gtdb-rs202-genomic.un"
+    conda: 'envs/sourmash.yml'
+    resources:
+        mem_mb = 16000,
+        tmpdir = TMPDIR
+    threads: 1
+    benchmark: "benchmarks/{sample}-{acc_db}_gather_nbhd_species.tsv"
+    shell:'''
+    sourmash gather -o {output.csv} --threshold-bp 0 --save-matches {output.matches} --output-unassigned {output.un} --scaled 2000 -k 51 {input.sig} {input.db} 
+    '''
+
 ######################################################
 ## Compare species-level db and gtdb-level db results
 ######################################################
@@ -594,3 +627,7 @@ rule sourmash_compare_orpheum_outputs_max:
     shell:'''
     sourmash compare --max-containment -o {output.comp} --csv {output.csv} {input}
     '''
+
+##############################################################
+## Build reference pangenome to compare kmer nbhds against
+##############################################################
