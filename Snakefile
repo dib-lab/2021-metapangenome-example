@@ -86,12 +86,15 @@ class Checkpoint_AccToDbs:
 
 rule all:
     input: 
+        expand("output/metabat2/{sample}/done.txt", sample = SAMPLES),
         Checkpoint_GatherResults("outputs/nbhd_sketch_tables/{acc}_long.csv"),
         Checkpoint_AccToDbs("outputs/pagoo_species/{acc_db}_binmap.pdf"),
         #Checkpoint_GatherResults(expand("outputs/nbhd_gather/{sample}-{{acc}}_gather_gtdb-rs202-genomic.csv", sample = SAMPLES)),
         expand("outputs/orpheum_compare/{sample}_comp_containment.csv", sample = SAMPLES),
         expand("outputs/orpheum_compare/{sample}_comp.csv", sample = SAMPLES),
-        Checkpoint_AccToDbs(expand("outputs/nbhd_species_gather/{sample}-{{acc_db}}_gather_gtdb-rs202-genomic.csv", sample = SAMPLES))
+        Checkpoint_AccToDbs(expand("outputs/nbhd_species_gather/{sample}-{{acc_db}}_gather_gtdb-rs202-genomic.csv", sample = SAMPLES)),
+        Checkpoint_AccToDbs("outputs/compare_all/{acc_db}_containment.csv"),
+        Checkpoint_AccToDbs("outputs/compare_core/{acc_db}_containment.csv"),
 
 rule fastp:
     input:
@@ -156,6 +159,96 @@ rule kmer_trim_reads:
     shell:'''
     interleave-reads.py {input} | trim-low-abund.py --gzip -C 3 -Z 18 -M 60e9 -V - -o {output}
     '''
+
+##############################################################
+## de novo assemble and bin to compare against metapangenome
+##############################################################
+
+rule assemble:
+    input: "outputs/abundtrim/{sample}.abundtrim.fq.gz"
+    output: "outputs/megahit/{sample}.contigs.fa"
+    conda: 'envs/megahit.yml'
+    threads: 1
+    resources:
+        mem_mb=32000,
+        tmpdir = TMPDIR
+    shell:'''
+    megahit --12 {input} --out-dir outputs/megahit_tmp/{wildcards.sample}_megahit --out-prefix {wildcards.sample}
+    mv outputs/megahit_tmp/{wildcards.sample}_megahit/{wildcards.sample}.contigs.fa {output}
+    '''
+
+rule gen_coverages_bowtie_build:
+    input: "outputs/megahit/{sample}.contigs.fa"
+    output: "outputs/megahit/{sample}.contigs.fa.1.ebwt"
+    conda: 'envs/bowtie2.yml'
+    threads: 1
+    resources:
+        mem_mb=4000,
+        tmpdir = TMPDIR
+    shell:'''
+    bowtie2-build {input} {input}    
+    '''
+
+rule gen_coverages_bowtie:
+    input:
+        bwt="outputs/megahit/{sample}.contigs.fa.1.ebwt",
+        fa="outputs/megahit/{sample}.contigs.fa",
+        fq="outputs/abundtrim/{sample}.abundtrim.fq.gz"
+    output: "outputs/bowtie2/{sample}_to_sort.bam"
+    conda: 'envs/bowtie2.yml'
+    threads: 1
+    resources:
+        mem_mb=6000,
+        tmpdir = TMPDIR
+    shell:'''
+    bowtie2 -x {input.fa} --interleaved {input.fq} \
+        samtools view -bS -o {output}
+    '''
+
+rule gen_coverages_sort:
+    input: "outputs/bowtie2/{sample}_to_sort.bam"
+    output: "outputs/bowtie2/{sample}.bam"
+    conda: 'envs/bowtie2.yml'
+    threads: 1
+    resources:
+        mem_mb=6000,
+        tmpdir = TMPDIR
+    shell:'''
+    samtools sort {input} -o {output}
+    '''
+
+rule gen_coverages_index:
+    input: "outputs/bowtie2/{sample}.bam"
+    output: "outputs/bowtie2/{sample}.bam.bai"
+    conda: 'envs/bowtie2.yml'
+    threads: 1
+    resources:
+        mem_mb=6000,
+        tmpdir = TMPDIR
+    shell:'''
+    samtools index {input}
+    '''
+
+rule bin:
+    input:
+        fa="outputs/megahit/{sample}.contigs.fa",
+        bam=  "outputs/bowtie2/{sample}.bam",
+        indx= "outputs/bowtie2/{sample}.bam.bai"
+    output: out = "output/metabat2/{sample}/done.txt"
+    params: outdir = lambda wildcards: "output/metabat2/" + wildcards.sample
+    conda: 'envs/metabat2.yml'
+    threads: 1
+    resources:
+        mem_mb=6000,
+        tmpdir = TMPDIR
+    shell:'''
+    metabat2 -m 1500 -i {input.fa} -a {input.bam} -o {params.outdir}
+    '''
+
+
+##############################################################
+## Pick organisms
+###############################################################
 
 rule sourmash_sketch:
     input: "outputs/abundtrim/{sample}.abundtrim.fq.gz"
@@ -579,7 +672,6 @@ rule sourmash_gather_orpheum_species:
     output: 
         csv="outputs/nbhd_species_gather/{sample}-{acc_db}_gather_gtdb-rs202-genomic.csv",
         matches="outputs/nbhd_species_gather/{sample}-{acc_db}_gather_gtdb-rs202-genomic.matches",
-        un="outputs/nbhd_species_gather/{sample}-{acc_db}_gather_gtdb-rs202-genomic.un"
     conda: 'envs/sourmash.yml'
     resources:
         mem_mb = 16000,
@@ -587,7 +679,7 @@ rule sourmash_gather_orpheum_species:
     threads: 1
     benchmark: "benchmarks/{sample}-{acc_db}_gather_nbhd_species.tsv"
     shell:'''
-    sourmash gather -o {output.csv} --threshold-bp 0 --save-matches {output.matches} --output-unassigned {output.un} --scaled 2000 -k 51 {input.sig} {input.db} 
+    sourmash gather -o {output.csv} --threshold-bp 0 --save-matches {output.matches} --scaled 2000 -k 51 {input.sig} {input.db} 
     '''
 
 ######################################################
@@ -631,3 +723,199 @@ rule sourmash_compare_orpheum_outputs_max:
 ##############################################################
 ## Build reference pangenome to compare kmer nbhds against
 ##############################################################
+
+# Note reference pangenomes were copied over from 2021-panmers,
+# to get around wildcard issues solving for species, and all 
+# genomes underneath that species.
+
+#############################################################
+## compare containment/similarity across core sequences
+#############################################################
+
+rule extract_pangenome_fasta_names:
+    input: 'outputs/roary/{species}/pan_genome_reference.fa',
+    output: 'outputs/roary/{species}/pan_genome_reference_names.txt'
+    threads: 1
+    resources: 
+        mem_mb= 4000,
+        tmpdir = TMPDIR
+    shell:'''
+    grep ">" {input} > {output}
+    '''
+
+rule identify_core_gene_sequence_names:
+    input: 
+        pg="outputs/pagoo_species/pagoo.txt",
+        pa='outputs/roary/{acc_db}/gene_presence_absence.csv', 
+        names='outputs/roary/{acc_db}/pan_genome_reference_names.txt'
+    output: core_names="outputs/roary/{acc_db}/pan_genome_reference_core_gene_names.txt"
+    threads: 1
+    conda: "envs/pagoo.yml"
+    resources: 
+        mem_mb= 16000,
+        tmpdir = TMPDIR
+    script: "scripts/identify_core_gene_sequence_names.R"
+
+rule extract_core_gene_sequences_from_pangenome:
+    input:
+        fa="outputs/roary/{acc_db}/pan_genome_reference.fa",
+        core_names="outputs/roary/{acc_db}/pan_genome_reference_core_gene_names.txt"
+    output: "outputs/roary/{acc_db}/pan_genome_reference_core_genes.fa"
+    conda: "envs/seqtk.yml"
+    resources:
+        mem_mb = 2000,
+        tmpdir=TMPDIR
+    threads: 1
+    shell:'''
+    seqtk subseq {input.fa} {input.core_names} > {output}
+    '''
+
+rule translate_core_gene_sequences_from_pangenome:
+    input: "outputs/roary/{acc_db}/pan_genome_reference_core_genes.fa"
+    output: "outputs/roary/{acc_db}/pan_genome_reference_core_genes.faa"
+    conda: 'envs/emboss.yml'
+    resources:
+        mem_mb = 4000,
+        tmpdir = TMPDIR
+    threads: 2
+    shell:'''
+    transeq {input} {output}
+    '''
+
+rule sketch_core_gene_sequences_from_pangenome:
+    input: "outputs/roary/{acc_db}/pan_genome_reference_core_genes.faa"
+    output: "outputs/roary_sigs_core/{acc_db}_pan_genome_reference_core_genes.sig"
+    conda: 'envs/sourmash.yml'
+    resources:
+        mem_mb = 4000,
+        tmpdir = TMPDIR
+    threads: 1
+    shell:"""
+    sourmash sketch protein -p k=10,scaled=100,protein -o {output} --name {wildcards.acc_db}_core_genes {input}
+    """
+ 
+rule intersect_species_sketches_for_core:
+    input: expand('outputs/nbhd_sigs_species/{sample}-{{acc_db}}.sig', sample = SAMPLES)
+    output: 'outputs/nbhd_sigs_species_core/{acc_db}_core_kmers.sig'
+    conda: 'envs/sourmash.yml'
+    resources:
+        mem_mb = 4000,
+        tmpdir = TMPDIR
+    threads: 1
+    shell:"""
+    sourmash sig intersect -o {output} {input} 
+    """
+
+rule compare_similarity_pangenomes_core: 
+    input:
+        kmer='outputs/nbhd_sigs_species_core/{acc_db}_core_kmers.sig',
+        gene="outputs/roary_sigs_core/{acc_db}_pan_genome_reference_core_genes.sig",
+    output: "outputs/compare_core/{acc_db}_similarity.csv"
+    conda: 'envs/sourmash.yml'
+    resources:
+        mem_mb = 4000,
+        tmpdir = TMPDIR
+    threads: 1
+    shell:"""
+    sourmash compare --csv {output} {input}
+    """
+
+rule compare_containment_pangenomes_core: 
+    input:
+        kmer='outputs/nbhd_sigs_species_core/{acc_db}_core_kmers.sig',
+        gene="outputs/roary_sigs_core/{acc_db}_pan_genome_reference_core_genes.sig",
+    output: "outputs/compare_core/{acc_db}_containment.csv"
+    conda: 'envs/sourmash.yml'
+    resources:
+        mem_mb = 4000,
+        tmpdir = TMPDIR
+    threads: 1
+    shell:"""
+    sourmash compare --containment --csv {output} {input}
+    """
+
+rule compare_maxcontainment_pangenomes_core: 
+    input:
+        kmer='outputs/nbhd_sigs_species_core/{acc_db}_core_kmers.sig',
+        gene="outputs/roary_sigs_core/{acc_db}_pan_genome_reference_core_genes.sig",
+    output: "outputs/compare_core/{acc_db}_maxcontainment.csv"
+    conda: 'envs/sourmash.yml'
+    resources:
+        mem_mb = 4000,
+        tmpdir = TMPDIR
+    threads: 1
+    shell:"""
+    sourmash compare --max-containment --csv {output} {input}
+    """
+    
+    
+########
+## Compare whole pangenomes
+########
+
+rule sketch_all_gene_sequences_from_pangenome:
+    input: "outputs/roary/{acc_db}/pan_genome_reference_core_genes.faa"
+    output: "outputs/roary_sigs_all/{acc_db}_pan_genome_reference_all_genes.sig"
+    conda: 'envs/sourmash.yml'
+    resources:
+        mem_mb = 4000,
+        tmpdir = TMPDIR
+    threads: 1
+    shell:"""
+    sourmash sketch protein -p k=10,scaled=100,protein -o {output} --name {wildcards.acc_db}_all_genes {input}
+    """
+ 
+rule merge_species_sketches_for_all:
+    input: expand('outputs/nbhd_sigs_species/{sample}-{{acc_db}}.sig', sample = SAMPLES)
+    output: 'outputs/nbhd_sigs_species_all/{acc_db}_all_kmers.sig'
+    conda: 'envs/sourmash.yml'
+    resources:
+        mem_mb = 4000,
+        tmpdir = TMPDIR
+    threads: 1
+    shell:"""
+    sourmash sig merge --name {wildcards.acc_db}_all_kmers -o {output} {input} 
+    """
+    
+rule compare_similarity_pangenomes_all: 
+    input:
+        kmer='outputs/nbhd_sigs_species_all/{acc_db}_all_kmers.sig',
+        gene="outputs/roary_sigs_all/{acc_db}_pan_genome_reference_all_genes.sig",
+    output: "outputs/compare_all/{acc_db}_similarity.csv"
+    conda: 'envs/sourmash.yml'
+    resources:
+        mem_mb = 4000,
+        tmpdir = TMPDIR
+    threads: 1
+    shell:"""
+    sourmash compare --csv {output} {input}
+    """
+
+rule compare_containment_pangenomes_all: 
+    input:
+        kmer='outputs/nbhd_sigs_species_all/{acc_db}_all_kmers.sig',
+        gene="outputs/roary_sigs_all/{acc_db}_pan_genome_reference_all_genes.sig",
+    output: "outputs/compare_all/{acc_db}_containment.csv"
+    conda: 'envs/sourmash.yml'
+    resources:
+        mem_mb = 4000,
+        tmpdir = TMPDIR
+    threads: 1
+    shell:"""
+    sourmash compare --containment --csv {output} {input}
+    """
+
+rule compare_maxcontainment_pangenomes_all: 
+    input:
+        kmer='outputs/nbhd_sigs_species_all/{acc_db}_all_kmers.sig',
+        gene="outputs/roary_sigs_all/{acc_db}_pan_genome_reference_all_genes.sig",
+    output: "outputs/compare_all/{acc_db}_maxcontainment.csv"
+    conda: 'envs/sourmash.yml'
+    resources:
+        mem_mb = 4000,
+        tmpdir = TMPDIR
+    threads: 1
+    shell:"""
+    sourmash compare --max-containment --csv {output} {input}
+    """
+
