@@ -84,9 +84,11 @@ class Checkpoint_AccToDbs:
         p = expand(self.pattern, acc_db=genome_acc_dbs, **w)
         return p
 
+
 rule all:
     input: 
-        expand("output/metabat2/{sample}/done.txt", sample = SAMPLES),
+        #expand("outputs/metabat2_gather/{sample}_done.txt", sample = SAMPLES),
+        #Checkpoint_AccToDbs("outputs/metabat2_gather_labelled_bins/{acc_db}.txt"),
         Checkpoint_GatherResults("outputs/nbhd_sketch_tables/{acc}_long.csv"),
         Checkpoint_AccToDbs("outputs/pagoo_species/{acc_db}_binmap.pdf"),
         #Checkpoint_GatherResults(expand("outputs/nbhd_gather/{sample}-{{acc}}_gather_gtdb-rs202-genomic.csv", sample = SAMPLES)),
@@ -95,6 +97,10 @@ rule all:
         Checkpoint_AccToDbs(expand("outputs/nbhd_species_gather/{sample}-{{acc_db}}_gather_gtdb-rs202-genomic.csv", sample = SAMPLES)),
         Checkpoint_AccToDbs("outputs/compare_all/{acc_db}_containment.csv"),
         Checkpoint_AccToDbs("outputs/compare_core/{acc_db}_containment.csv"),
+        # csvs for upset plots
+        Checkpoint_AccToDbs("outputs/metabat2_prokka_sigs_all/{acc_db}_all_kmers.csv"),
+        Checkpoint_AccToDbs("outputs/roary_sigs_all/{acc_db}_pan_genome_reference_all_genes.csv"),
+        Checkpoint_AccToDbs('outputs/nbhd_sigs_species_all/{acc_db}_all_kmers.csv')
 
 rule fastp:
     input:
@@ -164,22 +170,42 @@ rule kmer_trim_reads:
 ## de novo assemble and bin to compare against metapangenome
 ##############################################################
 
-rule assemble:
+
+rule split_paired_reads:
     input: "outputs/abundtrim/{sample}.abundtrim.fq.gz"
-    output: "outputs/megahit/{sample}.contigs.fa"
+    output: 
+        r1= "outputs/abundtrim_split/{sample}_R1.fq.gz",
+        r2= "outputs/abundtrim_split/{sample}_R2.fq.gz",
+        singleton = "outputs/abundtrim_split/{sample}_orphan.fq.gz"
+    threads: 1
+    resources:
+        mem_mb=8000,
+        tmpdir = TMPDIR
+    conda: 'envs/bbmap.yml'
+    shell:'''
+    repair.sh in1={input} out1={output.r1} out2={output.r2} outs={output.singleton} repair
+    '''
+
+rule assemble:
+    input: 
+        r1 = "outputs/abundtrim_split/{sample}_R1.fq.gz",
+        r2 = "outputs/abundtrim_split/{sample}_R2.fq.gz"
+    output:
+        tmp_dir = directory("outputs/megahit/{sample}_tmp"), 
+        fa="outputs/megahit/{sample}.contigs.fa"
     conda: 'envs/megahit.yml'
     threads: 1
     resources:
         mem_mb=32000,
         tmpdir = TMPDIR
     shell:'''
-    megahit --12 {input} --out-dir outputs/megahit_tmp/{wildcards.sample}_megahit --out-prefix {wildcards.sample}
-    mv outputs/megahit_tmp/{wildcards.sample}_megahit/{wildcards.sample}.contigs.fa {output}
+    megahit -1 {input.r1} -2 {input.r2} --out-dir {output.tmp_dir} --out-prefix {wildcards.sample}
+    mv {output.tmp_dir}/{wildcards.sample}.contigs.fa {output.fa}
     '''
 
 rule gen_coverages_bowtie_build:
     input: "outputs/megahit/{sample}.contigs.fa"
-    output: "outputs/megahit/{sample}.contigs.fa.1.ebwt"
+    output: "outputs/megahit/{sample}.contigs.fa.1.bt2"
     conda: 'envs/bowtie2.yml'
     threads: 1
     resources:
@@ -191,9 +217,10 @@ rule gen_coverages_bowtie_build:
 
 rule gen_coverages_bowtie:
     input:
-        bwt="outputs/megahit/{sample}.contigs.fa.1.ebwt",
+        bwt="outputs/megahit/{sample}.contigs.fa.1.bt2",
         fa="outputs/megahit/{sample}.contigs.fa",
-        fq="outputs/abundtrim/{sample}.abundtrim.fq.gz"
+        r1 = "outputs/abundtrim_split/{sample}_R1.fq.gz",
+        r2 = "outputs/abundtrim_split/{sample}_R2.fq.gz"
     output: "outputs/bowtie2/{sample}_to_sort.bam"
     conda: 'envs/bowtie2.yml'
     threads: 1
@@ -201,7 +228,7 @@ rule gen_coverages_bowtie:
         mem_mb=6000,
         tmpdir = TMPDIR
     shell:'''
-    bowtie2 -x {input.fa} --interleaved {input.fq} \
+    bowtie2 -x {input.fa} -1 {input.r1} -2 {input.r2} |
         samtools view -bS -o {output}
     '''
 
@@ -229,23 +256,175 @@ rule gen_coverages_index:
     samtools index {input}
     '''
 
-rule bin:
+rule get_metabat_depth_file:
     input:
-        fa="outputs/megahit/{sample}.contigs.fa",
         bam=  "outputs/bowtie2/{sample}.bam",
         indx= "outputs/bowtie2/{sample}.bam.bai"
-    output: out = "output/metabat2/{sample}/done.txt"
-    params: outdir = lambda wildcards: "output/metabat2/" + wildcards.sample
+    output: "outputs/metabat2/{sample}_metabat_depth.txt"
     conda: 'envs/metabat2.yml'
     threads: 1
     resources:
         mem_mb=6000,
         tmpdir = TMPDIR
     shell:'''
-    metabat2 -m 1500 -i {input.fa} -a {input.bam} -o {params.outdir}
+    jgi_summarize_bam_contig_depths --outputDepth {output} {input.bam}
     '''
 
+checkpoint metabat:
+    input:
+        depth="outputs/metabat2/{sample}_metabat_depth.txt",
+        fa="outputs/megahit/{sample}.contigs.fa",
+    output: directory("outputs/metabat2/{sample}")
+    params: outdir = lambda wildcards: "outputs/metabat2/" + wildcards.sample + "/" + "bin" 
+    conda: 'envs/metabat2.yml'
+    threads: 1
+    resources:
+        mem_mb=6000,
+        tmpdir = TMPDIR
+    shell:'''
+    metabat2 -m 1500 -i {input.fa} --abdFile {input.depth} -o {params.outdir}
+    #touch {output}
+    '''
 
+rule metabat_sketch:
+    input: "outputs/metabat2/{sample}/bin.{bin}.fa"
+    output: 'outputs/metabat2_sigs/{sample}_bin.{bin}.sig' 
+    conda: 'envs/sourmash.yml'
+    resources:
+        mem_mb = 4000,
+        tmpdir = TMPDIR
+    threads: 1
+    shell:"""
+    sourmash sketch dna -p k=31,scaled=2000 -o {output} --name {wildcards.sample}.bin{wildcards.bin} {input}
+    """
+
+rule metabat_gather:
+    input:
+        sig="outputs/metabat2_sigs/{sample}_bin.{bin}.sig",
+        db="/group/ctbrowngrp/gtdb/databases/ctb/gtdb-rs202.genomic.k31.sbt.zip",
+    output: 
+        csv="outputs/metabat2_gather/{sample}_bin.{bin}_gather_gtdb-rs202-genomic.csv",
+    conda: 'envs/sourmash.yml'
+    resources:
+        mem_mb = 16000,
+        tmpdir = TMPDIR
+    threads: 1
+    shell:'''
+    sourmash gather -o {output.csv} --threshold-bp 0 --scaled 2000 -k 31 {input.sig} {input.db} 
+    '''
+
+def checkpoint_metabat2_1(wildcards):
+    # checkpoint_output encodes the output dir from the checkpoint rule.
+    checkpoint_output = checkpoints.metabat.get(**wildcards).output[0]    
+    file_names = expand("outputs/metabat2_gather/{{sample}}_bin.{bin}_gather_gtdb-rs202-genomic.csv",
+                        bin = glob_wildcards(os.path.join(checkpoint_output, "bin.{bin}.fa")).bin)
+    return file_names
+
+rule metabat_gather_dummy:
+    input: checkpoint_metabat2_1
+    output: touch("outputs/metabat2_gather/{sample}_done.txt")
+    
+     
+rule metabat_prokka:
+    input: "outputs/metabat2/{sample}/bin.{bin}.fa"
+    output: "outputs/metabat2_prokka/{sample}_bin.{bin}.faa"
+    conda: 'envs/prokka.yml'
+    resources:
+        mem_mb = 8000,
+        tmpdir = TMPDIR
+    threads: 2
+    params: 
+        outdir = lambda wildcards: 'outputs/metabat2_prokka/'
+    shell:'''
+    prokka {input} --outdir {params.outdir} --prefix {wildcards.sample}_bin.{wildcards.bin} \
+        --metagenome --force --locustag {wildcards.sample}_bin.{wildcards.bin} --cpus {threads} --centre X --compliant
+    '''
+
+rule metabat_prokka_sketch:
+    input: "outputs/metabat2_prokka/{sample}_bin.{bin}.faa"
+    output: 'outputs/metabat2_prokka_sigs/{sample}_bin.{bin}.sig' 
+    conda: 'envs/sourmash.yml'
+    resources:
+        mem_mb = 4000,
+        tmpdir = TMPDIR
+    threads: 1
+    shell:"""
+    sourmash sketch protein -p k=10,scaled=100,protein -o {output} --name {wildcards.sample}_bin.{wildcards.bin} {input}
+    """
+
+def checkpoint_metabat2_2(wildcards):
+    # checkpoint_output encodes the output dir from the checkpoint rule.
+    checkpoint_output = checkpoints.metabat.get(**wildcards).output[0]    
+    file_names = expand("outputs/metabat2_prokka_sigs/{{sample}}_bin.{bin}.sig",
+                        bin = glob_wildcards(os.path.join(checkpoint_output, "bin.{bin}.fa")).bin)
+    return file_names
+
+rule metabat_prokka_sketch_dummy:
+    input: checkpoint_metabat2_2
+    output: touch("outputs/metabat2_prokka_sigs/{sample}_done.txt")
+
+rule metabat_generate_lists_of_bins_of_same_species:
+    input: 
+        lineages = "inputs/gtdb-rs202.taxonomy.v2.csv",
+        acc_to_db = "outputs/genbank/gather_gtdb-rs202-genomic.x.dbs.csv",
+        dummy1 = expand("outputs/metabat2_gather/{sample}_done.txt", sample = SAMPLES),
+        dummy2 = expand("outputs/metabat2_prokka_sigs/{sample}_done.txt", sample = SAMPLES)
+    output: txt = "outputs/metabat2_gather_labelled_bins/{acc_db}.txt"
+    conda: 'envs/tidy.yml'
+    resources:
+        mem_mb = 16000,
+        tmpdir = TMPDIR
+    threads: 1
+    script: "scripts/metabat_generate_lists_of_bins_of_same_species.R"
+
+rule metabat_intersect_sigs_for_core:
+    input: "outputs/metabat2_gather_labelled_bins/{acc_db}.txt"
+    output: "outputs/metabat2_prokka_sigs_core/{acc_db}_core_kmers_unnamed.sig"
+    conda: 'envs/sourmash.yml'
+    resources:
+        mem_mb = 4000,
+        tmpdir = TMPDIR
+    threads: 1
+    shell:"""
+    sourmash sig intersect -o {output} --from-file {input} 
+    """
+    
+rule metabat_intersect_sigs_for_core_rename:
+    input:  "outputs/metabat2_prokka_sigs_core/{acc_db}_core_kmers_unnamed.sig"
+    output:  "outputs/metabat2_prokka_sigs_core/{acc_db}_core_kmers.sig"
+    conda: 'envs/sourmash.yml'
+    resources:
+        mem_mb = 4000,
+        tmpdir = TMPDIR
+    threads: 1
+    shell:"""
+    sourmash sig rename -o {output} {input} {wildcards.acc_db}_metabat2_core
+    """
+
+rule metabat_merge_species_sketches_for_all:
+    input: "outputs/metabat2_gather_labelled_bins/{acc_db}.txt"
+    output: "outputs/metabat2_prokka_sigs_all/{acc_db}_all_kmers.sig"
+    conda: 'envs/sourmash.yml'
+    resources:
+        mem_mb = 4000,
+        tmpdir = TMPDIR
+    threads: 1
+    shell:"""
+    sourmash sig merge --name {wildcards.acc_db}_metabat2_all -o {output} --from-file {input} 
+    """
+    
+rule metabat_sig_to_csv_species_for_all:
+    input: "outputs/metabat2_prokka_sigs_all/{acc_db}_all_kmers.sig"
+    output: "outputs/metabat2_prokka_sigs_all/{acc_db}_all_kmers.csv"
+    conda: 'envs/sourmash.yml'
+    resources:
+        mem_mb = 4000,
+        tmpdir = TMPDIR
+    threads: 1
+    shell:"""
+    python scripts/sig_to_csv.py {input} {output}
+    """
+    
 ##############################################################
 ## Pick organisms
 ###############################################################
@@ -547,7 +726,6 @@ rule make_hash_table_long:
         tmpdir = TMPDIR
     script: "scripts/sketch_csv_to_long.R"
     
-# rule pagoo
 
 #######################################
 ## Species-specific databases
@@ -682,6 +860,66 @@ rule sourmash_gather_orpheum_species:
     sourmash gather -o {output.csv} --threshold-bp 0 --save-matches {output.matches} --scaled 2000 -k 51 {input.sig} {input.db} 
     '''
 
+# create a signature for the *core* kaa-mer metapangenome
+rule generate_list_of_sigs_to_intersect_based_on_kmer_threshold:
+    input: csv="outputs/nbhd_sketch_tables_species/{acc_db}_long.csv"
+    output: lst="outputs/nbhd_sigs_species_lists/{acc_db}.txt"
+    conda: "envs/tidy.yml"
+    resources:
+        mem_mb = 4000,
+        tmpdir = TMPDIR
+    threads: 1
+    script: "scripts/kaa_generate_list_of_sigs_to_intersect.R"
+
+rule intersect_species_sketches_for_core:
+    input: "outputs/nbhd_sigs_species_lists/{acc_db}.txt"
+    output: 'outputs/nbhd_sigs_species_core/{acc_db}_core_kmers_unnamed.sig'
+    conda: 'envs/sourmash.yml'
+    resources:
+        mem_mb = 4000,
+        tmpdir = TMPDIR
+    threads: 1
+    shell:"""
+    sourmash sig intersect -o {output} --from-file {input} 
+    """
+
+rule rename_species_sketches_for_core:
+    input: 'outputs/nbhd_sigs_species_core/{acc_db}_core_kmers_unnamed.sig'
+    output: 'outputs/nbhd_sigs_species_core/{acc_db}_core_kmers.sig'
+    conda: 'envs/sourmash.yml'
+    resources:
+        mem_mb = 4000,
+        tmpdir = TMPDIR
+    threads: 1
+    shell:"""
+    sourmash sig rename -o {output} {input} {wildcards.acc_db}_kaa_core
+    """
+
+# create a signature for the *entire* kaa-mer metapangenome
+rule merge_species_sketches_for_all:
+    input: expand('outputs/nbhd_sigs_species/{sample}-{{acc_db}}.sig', sample = SAMPLES)
+    output: 'outputs/nbhd_sigs_species_all/{acc_db}_all_kmers.sig'
+    conda: 'envs/sourmash.yml'
+    resources:
+        mem_mb = 4000,
+        tmpdir = TMPDIR
+    threads: 1
+    shell:"""
+    sourmash sig merge --name {wildcards.acc_db}_kaa_all -o {output} {input} 
+    """
+
+rule species_sketches_sig_to_csv_for_all:
+    input: 'outputs/nbhd_sigs_species_all/{acc_db}_all_kmers.sig'
+    output: 'outputs/nbhd_sigs_species_all/{acc_db}_all_kmers.csv'
+    conda: 'envs/sourmash.yml'
+    resources:
+        mem_mb = 4000,
+        tmpdir = TMPDIR
+    threads: 1
+    shell:"""
+    python scripts/sig_to_csv.py {input} {output}
+    """
+    
 ######################################################
 ## Compare species-level db and gtdb-level db results
 ######################################################
@@ -728,9 +966,6 @@ rule sourmash_compare_orpheum_outputs_max:
 # to get around wildcard issues solving for species, and all 
 # genomes underneath that species.
 
-#############################################################
-## compare containment/similarity across core sequences
-#############################################################
 
 rule extract_pangenome_fasta_names:
     input: 'outputs/roary/{species}/pan_genome_reference.fa',
@@ -791,25 +1026,42 @@ rule sketch_core_gene_sequences_from_pangenome:
         tmpdir = TMPDIR
     threads: 1
     shell:"""
-    sourmash sketch protein -p k=10,scaled=100,protein -o {output} --name {wildcards.acc_db}_core_genes {input}
+    sourmash sketch protein -p k=10,scaled=100,protein -o {output} --name {wildcards.acc_db}_roary_core {input}
     """
  
-rule intersect_species_sketches_for_core:
-    input: expand('outputs/nbhd_sigs_species/{sample}-{{acc_db}}.sig', sample = SAMPLES)
-    output: 'outputs/nbhd_sigs_species_core/{acc_db}_core_kmers.sig'
+rule sketch_all_gene_sequences_from_pangenome:
+    input: "outputs/roary/{acc_db}/pan_genome_reference_core_genes.faa"
+    output: "outputs/roary_sigs_all/{acc_db}_pan_genome_reference_all_genes.sig"
     conda: 'envs/sourmash.yml'
     resources:
         mem_mb = 4000,
         tmpdir = TMPDIR
     threads: 1
     shell:"""
-    sourmash sig intersect -o {output} {input} 
+    sourmash sketch protein -p k=10,scaled=100,protein -o {output} --name {wildcards.acc_db}_roary_all {input}
     """
+ 
+rule roary_sketches_sig_to_csv_for_all:
+    input: "outputs/roary_sigs_all/{acc_db}_pan_genome_reference_all_genes.sig"
+    output: "outputs/roary_sigs_all/{acc_db}_pan_genome_reference_all_genes.csv"
+    conda: 'envs/sourmash.yml'
+    resources:
+        mem_mb = 4000,
+        tmpdir = TMPDIR
+    threads: 1
+    shell:"""
+    python scripts/sig_to_csv.py {input} {output}
+    """
+    
+#############################################################
+## compare containment/similarity across core sequences
+#############################################################
 
 rule compare_similarity_pangenomes_core: 
     input:
         kmer='outputs/nbhd_sigs_species_core/{acc_db}_core_kmers.sig',
         gene="outputs/roary_sigs_core/{acc_db}_pan_genome_reference_core_genes.sig",
+        bins="outputs/metabat2_prokka_sigs_core/{acc_db}_core_kmers.sig"
     output: "outputs/compare_core/{acc_db}_similarity.csv"
     conda: 'envs/sourmash.yml'
     resources:
@@ -824,6 +1076,7 @@ rule compare_containment_pangenomes_core:
     input:
         kmer='outputs/nbhd_sigs_species_core/{acc_db}_core_kmers.sig',
         gene="outputs/roary_sigs_core/{acc_db}_pan_genome_reference_core_genes.sig",
+        bins="outputs/metabat2_prokka_sigs_core/{acc_db}_core_kmers.sig"
     output: "outputs/compare_core/{acc_db}_containment.csv"
     conda: 'envs/sourmash.yml'
     resources:
@@ -838,6 +1091,7 @@ rule compare_maxcontainment_pangenomes_core:
     input:
         kmer='outputs/nbhd_sigs_species_core/{acc_db}_core_kmers.sig',
         gene="outputs/roary_sigs_core/{acc_db}_pan_genome_reference_core_genes.sig",
+        bins="outputs/metabat2_prokka_sigs_core/{acc_db}_core_kmers.sig"
     output: "outputs/compare_core/{acc_db}_maxcontainment.csv"
     conda: 'envs/sourmash.yml'
     resources:
@@ -849,38 +1103,16 @@ rule compare_maxcontainment_pangenomes_core:
     """
     
     
-########
+###########################################
 ## Compare whole pangenomes
-########
+###########################################
 
-rule sketch_all_gene_sequences_from_pangenome:
-    input: "outputs/roary/{acc_db}/pan_genome_reference_core_genes.faa"
-    output: "outputs/roary_sigs_all/{acc_db}_pan_genome_reference_all_genes.sig"
-    conda: 'envs/sourmash.yml'
-    resources:
-        mem_mb = 4000,
-        tmpdir = TMPDIR
-    threads: 1
-    shell:"""
-    sourmash sketch protein -p k=10,scaled=100,protein -o {output} --name {wildcards.acc_db}_all_genes {input}
-    """
- 
-rule merge_species_sketches_for_all:
-    input: expand('outputs/nbhd_sigs_species/{sample}-{{acc_db}}.sig', sample = SAMPLES)
-    output: 'outputs/nbhd_sigs_species_all/{acc_db}_all_kmers.sig'
-    conda: 'envs/sourmash.yml'
-    resources:
-        mem_mb = 4000,
-        tmpdir = TMPDIR
-    threads: 1
-    shell:"""
-    sourmash sig merge --name {wildcards.acc_db}_all_kmers -o {output} {input} 
-    """
     
 rule compare_similarity_pangenomes_all: 
     input:
         kmer='outputs/nbhd_sigs_species_all/{acc_db}_all_kmers.sig',
         gene="outputs/roary_sigs_all/{acc_db}_pan_genome_reference_all_genes.sig",
+        bins="outputs/metabat2_prokka_sigs_all/{acc_db}_all_kmers.sig"
     output: "outputs/compare_all/{acc_db}_similarity.csv"
     conda: 'envs/sourmash.yml'
     resources:
@@ -895,6 +1127,7 @@ rule compare_containment_pangenomes_all:
     input:
         kmer='outputs/nbhd_sigs_species_all/{acc_db}_all_kmers.sig',
         gene="outputs/roary_sigs_all/{acc_db}_pan_genome_reference_all_genes.sig",
+        bins="outputs/metabat2_prokka_sigs_all/{acc_db}_all_kmers.sig"
     output: "outputs/compare_all/{acc_db}_containment.csv"
     conda: 'envs/sourmash.yml'
     resources:
@@ -909,6 +1142,7 @@ rule compare_maxcontainment_pangenomes_all:
     input:
         kmer='outputs/nbhd_sigs_species_all/{acc_db}_all_kmers.sig',
         gene="outputs/roary_sigs_all/{acc_db}_pan_genome_reference_all_genes.sig",
+        bins="outputs/metabat2_prokka_sigs_all/{acc_db}_all_kmers.sig"
     output: "outputs/compare_all/{acc_db}_maxcontainment.csv"
     conda: 'envs/sourmash.yml'
     resources:
