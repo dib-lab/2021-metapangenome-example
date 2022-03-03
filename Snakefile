@@ -283,27 +283,26 @@ checkpoint metabat:
         tmpdir = TMPDIR
     shell:'''
     metabat2 -m 1500 -i {input.fa} --abdFile {input.depth} -o {params.outdir}
-    #touch {output}
     '''
 
 rule metabat_sketch:
-    input: "outputs/metabat2/{sample}/bin.{bin}.fa"
-    output: 'outputs/metabat2_sigs/{sample}_bin.{bin}.sig' 
+    input: "outputs/metabat2/{sample}/bin.{binn}.fa"
+    output: 'outputs/metabat2_sigs/{sample}_bin.{binn}.sig' 
     conda: 'envs/sourmash.yml'
     resources:
         mem_mb = 4000,
         tmpdir = TMPDIR
     threads: 1
     shell:"""
-    sourmash sketch dna -p k=31,scaled=2000 -o {output} --name {wildcards.sample}.bin{wildcards.bin} {input}
+    sourmash sketch dna -p k=31,scaled=2000 -o {output} --name {wildcards.sample}.bin{wildcards.binn} {input}
     """
 
 rule metabat_gather:
     input:
-        sig="outputs/metabat2_sigs/{sample}_bin.{bin}.sig",
+        sig="outputs/metabat2_sigs/{sample}_bin.{binn}.sig",
         db="/group/ctbrowngrp/gtdb/databases/ctb/gtdb-rs202.genomic.k31.sbt.zip",
     output: 
-        csv="outputs/metabat2_gather/{sample}_bin.{bin}_gather_gtdb-rs202-genomic.csv",
+        csv="outputs/metabat2_gather/{sample}_bin.{binn}_gather_gtdb-rs202-genomic.csv",
     conda: 'envs/sourmash.yml'
     resources:
         mem_mb = 16000,
@@ -313,20 +312,100 @@ rule metabat_gather:
     sourmash gather -o {output.csv} --threshold-bp 0 --scaled 2000 -k 31 {input.sig} {input.db} 
     '''
 
-def checkpoint_metabat2_1(wildcards):
+def checkpoint_metabat_1(wildcards):
     # checkpoint_output encodes the output dir from the checkpoint rule.
     checkpoint_output = checkpoints.metabat.get(**wildcards).output[0]    
-    file_names = expand("outputs/metabat2_gather/{{sample}}_bin.{bin}_gather_gtdb-rs202-genomic.csv",
-                        bin = glob_wildcards(os.path.join(checkpoint_output, "bin.{bin}.fa")).bin)
+    file_names = expand("outputs/metabat2_gather/{{sample}}_bin.{binn}_gather_gtdb-rs202-genomic.csv",
+                        binn = glob_wildcards(os.path.join(checkpoint_output, "bin.{binn}.fa")).binn)
     return file_names
 
 rule metabat_gather_dummy:
-    input: checkpoint_metabat2_1
-    output: touch("outputs/metabat2_gather/{sample}_done.txt")
+    input: 
+        gtdb_lineages = "inputs/gtdb-rs202.taxonomy.v2.csv",
+        gather=checkpoint_metabat_1
+    output:
+        #tch=touch("outputs/metabat2_gather/{sample}_done.txt"),
+        charcoal_lineages="outputs/metabat2_gather_lineages/{sample}_bin_lineages.txt",
+    conda: "envs/tidy.yml"
+    resources:
+        mem_mb = 4000,
+        tmpdir = TMPDIR
+    threads: 1
+    script: "scripts/generate_charcoal_lineages.R"
     
-     
+def checkpoint_metabat_2(wildcards):
+    # checkpoint_output encodes the output dir from the checkpoint rule.
+    checkpoint_output = checkpoints.metabat.get(**wildcards).output[0]    
+    file_names = expand("outputs/metabat2/{{sample}}/bin.{binn}.fa",
+                        binn = glob_wildcards(os.path.join(checkpoint_output, "bin.{binn}.fa")).binn)
+    return file_names
+
+rule charcoal_generate_genome_list:
+    input: checkpoint_metabat_2
+    output: "outputs/metabat2_charcoal_conf/charcoal_{sample}.genome-list.txt"
+    threads: 1
+    resources:
+        mem_mb=500,
+        tmpdir = TMPDIR
+    params: genome_dir = lambda wildcards: "outputs/metabat2/" + wildcards.sample
+    shell:'''
+    ls {params.genome_dir}/*fa | xargs -n 1 basename > {output} 
+    '''
+
+rule charcoal_generate_conf_file:
+    input:
+        genome_list = "outputs/metabat2_charcoal_conf/charcoal_{sample}.genome-list.txt",
+        charcoal_lineages="outputs/metabat2_gather_lineages/{sample}_bin_lineages.txt",
+        db="/group/ctbrowngrp/gtdb/databases/ctb/gtdb-rs202.genomic.k31.sbt.zip",
+        db_lineages="inputs/gtdb-rs202.taxonomy.v2.csv"
+    output:
+        conf = "outputs/metabat2_charcoal_conf/charcoal-conf-{sample}.yml",
+    params: 
+        genome_dir = lambda wildcards: "outputs/metabat2/" + wildcards.sample,
+        output_dir = lambda wildcards: "outputs/metabat2_charcoal/" + wildcards.sample 
+    resources:
+        mem_mb = 500,
+        tmpdir = TMPDIR
+    threads: 1
+    run:
+        with open(output.conf, 'wt') as fp:
+            print(f"""\
+output_dir: {params.output_dir}
+genome_list: {input.genome_list}
+genome_dir: {params.genome_dir}
+provided_lineages: {input.charcoal_lineages}
+match_rank: order
+gather_db:
+ - {input.db} 
+lineages_csv: {input.db_lineages} 
+strict: 1
+""", file=fp)
+
+checkpoint metabat_charcoal:
+    input: conf = "outputs/metabat2_charcoal_conf/charcoal-conf-{sample}.yml",
+    output: directory("outputs/metabat2_charcoal/{sample}/")
+    resources:
+        mem_mb = 64000,
+        tmpdir = TMPDIR
+    threads: 2
+    conda: "envs/charcoal.yml"
+    shell:'''
+    python -m charcoal run {input.conf} -j {threads} clean --nolock --latency-wait 15 --rerun-incomplete --use-conda
+    '''
+
+rule metabat_gunzip_charcoal:
+    input: "outputs/metabat2_charcoal/{sample}/bin.{bin}.fa.clean.fa.gz"
+    output: "outputs/metabat2_charcoal/{sample}/bin.{bin}.fa.clean.fa"
+    resources:
+        mem_mb = 800,
+        tmpdir = TMPDIR
+    threads: 1
+    shell:'''
+    gunzip -c {input} > {output}
+    '''
+
 rule metabat_prokka:
-    input: "outputs/metabat2/{sample}/bin.{bin}.fa"
+    input: "outputs/metabat2_charcoal/{sample}/bin.{bin}.fa.clean.fa"
     output: "outputs/metabat2_prokka/{sample}_bin.{bin}.faa"
     conda: 'envs/prokka.yml'
     resources:
@@ -352,22 +431,22 @@ rule metabat_prokka_sketch:
     sourmash sketch protein -p k=10,scaled=100,protein -o {output} --name {wildcards.sample}_bin.{wildcards.bin} {input}
     """
 
-def checkpoint_metabat2_2(wildcards):
+def checkpoint_charcoal_1(wildcards):
     # checkpoint_output encodes the output dir from the checkpoint rule.
-    checkpoint_output = checkpoints.metabat.get(**wildcards).output[0]    
+    checkpoint_output = checkpoints.metabat_charcoal.get(**wildcards).output[0]    
     file_names = expand("outputs/metabat2_prokka_sigs/{{sample}}_bin.{bin}.sig",
-                        bin = glob_wildcards(os.path.join(checkpoint_output, "bin.{bin}.fa")).bin)
+                        bin = glob_wildcards(os.path.join(checkpoint_output, "bin.{bin}.fa.clean.fa.gz")).bin)
     return file_names
 
 rule metabat_prokka_sketch_dummy:
-    input: checkpoint_metabat2_2
+    input: checkpoint_charcoal_1
     output: touch("outputs/metabat2_prokka_sigs/{sample}_done.txt")
 
 rule metabat_generate_lists_of_bins_of_same_species:
     input: 
         lineages = "inputs/gtdb-rs202.taxonomy.v2.csv",
-        acc_to_db = "outputs/genbank/gather_gtdb-rs202-genomic.x.dbs.csv",
-        dummy1 = expand("outputs/metabat2_gather/{sample}_done.txt", sample = SAMPLES),
+        acc_to_db = ancient("outputs/genbank/gather_gtdb-rs202-genomic.x.dbs.csv"),
+        #dummy1 = expand("outputs/metabat2_gather/{sample}_done.txt", sample = SAMPLES),
         dummy2 = expand("outputs/metabat2_prokka_sigs/{sample}_done.txt", sample = SAMPLES)
     output: txt = "outputs/metabat2_gather_labelled_bins/{acc_db}.txt"
     conda: 'envs/tidy.yml'
