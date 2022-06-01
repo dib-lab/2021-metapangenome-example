@@ -8,6 +8,11 @@ SAMPLES = ['HSM67VF9', 'HSM67VFD', 'HSM67VFJ', 'HSM6XRQB',
            'HSM7CYY7', 'HSM7CYY9', 'HSM7CYYB', 'HSM7CYYD']
 TMPDIR = "/scratch/tereiter"
 
+# constrain acc_db so that it solves properly
+wildcard_constraints:
+    #acc_db="GC._*-s__*"
+    acc_db="G.*"
+
 class Checkpoint_GatherResults:
     """
     Define a class a la genome-grist to simplify file specification
@@ -84,13 +89,29 @@ class Checkpoint_AccToDbs:
         p = expand(self.pattern, acc_db=genome_acc_dbs, **w)
         return p
 
+
 rule all:
     input: 
-        Checkpoint_GatherResults("outputs/nbhd_sketch_tables/{acc}_long.csv"),
-        Checkpoint_AccToDbs("outputs/pagoo_species/{acc_db}_binmap.pdf"),
-        #Checkpoint_GatherResults(expand("outputs/nbhd_gather/{sample}-{{acc}}_gather_gtdb-rs202-genomic.csv", sample = SAMPLES)),
-        expand("outputs/orpheum_compare/{sample}_comp_containment.csv", sample = SAMPLES),
-        expand("outputs/orpheum_compare/{sample}_comp.csv", sample = SAMPLES)
+        #Checkpoint_GatherResults("outputs/nbhd_sketch_tables/{acc}_long.csv"),
+        #Checkpoint_AccToDbs("outputs/pagoo_species/{acc_db}_binmap.pdf"),
+        ##Checkpoint_GatherResults(expand("outputs/nbhd_gather/{sample}-{{acc}}_gather_gtdb-rs202-genomic.csv", sample = SAMPLES)),
+        #expand("outputs/orpheum_compare/{sample}_comp_containment.csv", sample = SAMPLES),
+        #expand("outputs/orpheum_compare/{sample}_comp.csv", sample = SAMPLES),
+        #Checkpoint_AccToDbs(expand("outputs/nbhd_species_gather/{sample}-{{acc_db}}_gather_gtdb-rs202-genomic.csv", sample = SAMPLES)),
+        #Checkpoint_AccToDbs("outputs/compare_all/{acc_db}_containment.csv"),
+        #Checkpoint_AccToDbs("outputs/compare_core/{acc_db}_containment.csv"),
+        # csvs for upset plots
+        #Checkpoint_AccToDbs("outputs/metabat2_prokka_sigs_all/{acc_db}_all_kmers.csv"),
+        #Checkpoint_AccToDbs("outputs/roary_sigs_all/{acc_db}_pan_genome_reference_all_genes.csv"),
+        #Checkpoint_AccToDbs('outputs/nbhd_sigs_species_all/{acc_db}_all_kmers.csv'), 
+        # reads that don't map to roary or metabat
+        Checkpoint_AccToDbs(expand("outputs/orpheum_species_map/03_unmapped_nucleotide/{sample}-{{acc_db}}.fq", sample = SAMPLES)),
+        Checkpoint_AccToDbs(expand("outputs/orpheum_species_map/03_unmapped_aminoacid/{sample}-{{acc_db}}.fq", sample = SAMPLES)),
+        Checkpoint_AccToDbs(expand("outputs/orpheum_species_map/00_roary_nucleotide/{sample}-{{acc_db}}.stat", sample = SAMPLES)),
+        Checkpoint_AccToDbs(expand("outputs/orpheum_species_map/02_metabat_nucleotide/{sample}-{{acc_db}}.stat", sample = SAMPLES)),
+        Checkpoint_AccToDbs(expand("outputs/orpheum_species_map/00_roary_aminoacid/{sample}-{{acc_db}}.stat", sample = SAMPLES)),
+        Checkpoint_AccToDbs(expand("outputs/orpheum_species_map/02_metabat_aminoacid/{sample}-{{acc_db}}.stat", sample = SAMPLES)),
+
 
 rule fastp:
     input:
@@ -155,6 +176,348 @@ rule kmer_trim_reads:
     shell:'''
     interleave-reads.py {input} | trim-low-abund.py --gzip -C 3 -Z 18 -M 60e9 -V - -o {output}
     '''
+
+##############################################################
+## de novo assemble and bin to compare against metapangenome
+##############################################################
+
+
+rule split_paired_reads:
+    input: "outputs/abundtrim/{sample}.abundtrim.fq.gz"
+    output: 
+        r1= "outputs/abundtrim_split/{sample}_R1.fq.gz",
+        r2= "outputs/abundtrim_split/{sample}_R2.fq.gz",
+        singleton = "outputs/abundtrim_split/{sample}_orphan.fq.gz"
+    threads: 1
+    resources:
+        mem_mb=8000,
+        tmpdir = TMPDIR
+    conda: 'envs/bbmap.yml'
+    shell:'''
+    repair.sh in1={input} out1={output.r1} out2={output.r2} outs={output.singleton} repair
+    '''
+
+rule assemble:
+    input: 
+        r1 = "outputs/abundtrim_split/{sample}_R1.fq.gz",
+        r2 = "outputs/abundtrim_split/{sample}_R2.fq.gz"
+    output:
+        tmp_dir = directory("outputs/megahit/{sample}_tmp"), 
+        fa="outputs/megahit/{sample}.contigs.fa"
+    conda: 'envs/megahit.yml'
+    threads: 1
+    resources:
+        mem_mb=32000,
+        tmpdir = TMPDIR
+    shell:'''
+    megahit -1 {input.r1} -2 {input.r2} --out-dir {output.tmp_dir} --out-prefix {wildcards.sample}
+    mv {output.tmp_dir}/{wildcards.sample}.contigs.fa {output.fa}
+    '''
+
+rule gen_coverages_bowtie_build:
+    input: "outputs/megahit/{sample}.contigs.fa"
+    output: "outputs/megahit/{sample}.contigs.fa.1.bt2"
+    conda: 'envs/bowtie2.yml'
+    threads: 1
+    resources:
+        mem_mb=4000,
+        tmpdir = TMPDIR
+    shell:'''
+    bowtie2-build {input} {input}    
+    '''
+
+rule gen_coverages_bowtie:
+    input:
+        bwt="outputs/megahit/{sample}.contigs.fa.1.bt2",
+        fa="outputs/megahit/{sample}.contigs.fa",
+        r1 = "outputs/abundtrim_split/{sample}_R1.fq.gz",
+        r2 = "outputs/abundtrim_split/{sample}_R2.fq.gz"
+    output: "outputs/bowtie2/{sample}_to_sort.bam"
+    conda: 'envs/bowtie2.yml'
+    threads: 1
+    resources:
+        mem_mb=6000,
+        tmpdir = TMPDIR
+    shell:'''
+    bowtie2 -x {input.fa} -1 {input.r1} -2 {input.r2} |
+        samtools view -bS -o {output}
+    '''
+
+rule gen_coverages_sort:
+    input: "outputs/bowtie2/{sample}_to_sort.bam"
+    output: "outputs/bowtie2/{sample}.bam"
+    conda: 'envs/bowtie2.yml'
+    threads: 1
+    resources:
+        mem_mb=6000,
+        tmpdir = TMPDIR
+    shell:'''
+    samtools sort {input} -o {output}
+    '''
+
+rule gen_coverages_index:
+    input: "outputs/bowtie2/{sample}.bam"
+    output: "outputs/bowtie2/{sample}.bam.bai"
+    conda: 'envs/bowtie2.yml'
+    threads: 1
+    resources:
+        mem_mb=6000,
+        tmpdir = TMPDIR
+    shell:'''
+    samtools index {input}
+    '''
+
+rule get_metabat_depth_file:
+    input:
+        bam=  "outputs/bowtie2/{sample}.bam",
+        indx= "outputs/bowtie2/{sample}.bam.bai"
+    output: "outputs/metabat2/{sample}_metabat_depth.txt"
+    conda: 'envs/metabat2.yml'
+    threads: 1
+    resources:
+        mem_mb=6000,
+        tmpdir = TMPDIR
+    shell:'''
+    jgi_summarize_bam_contig_depths --outputDepth {output} {input.bam}
+    '''
+
+checkpoint metabat:
+    input:
+        depth="outputs/metabat2/{sample}_metabat_depth.txt",
+        fa="outputs/megahit/{sample}.contigs.fa",
+    output: directory("outputs/metabat2/{sample}")
+    params: outdir = lambda wildcards: "outputs/metabat2/" + wildcards.sample + "/" + "bin" 
+    conda: 'envs/metabat2.yml'
+    threads: 1
+    resources:
+        mem_mb=6000,
+        tmpdir = TMPDIR
+    shell:'''
+    metabat2 -m 1500 -i {input.fa} --abdFile {input.depth} -o {params.outdir}
+    '''
+
+rule metabat_sketch:
+    input: "outputs/metabat2/{sample}/bin.{binn}.fa"
+    output: 'outputs/metabat2_sigs/{sample}_bin.{binn}.sig' 
+    conda: 'envs/sourmash.yml'
+    resources:
+        mem_mb = 4000,
+        tmpdir = TMPDIR
+    threads: 1
+    shell:"""
+    sourmash sketch dna -p k=31,scaled=2000 -o {output} --name {wildcards.sample}.bin{wildcards.binn} {input}
+    """
+
+rule metabat_gather:
+    input:
+        sig="outputs/metabat2_sigs/{sample}_bin.{binn}.sig",
+        db="/group/ctbrowngrp/gtdb/databases/ctb/gtdb-rs202.genomic.k31.sbt.zip",
+    output: 
+        csv="outputs/metabat2_gather/{sample}_bin.{binn}_gather_gtdb-rs202-genomic.csv",
+    conda: 'envs/sourmash.yml'
+    resources:
+        mem_mb = 16000,
+        tmpdir = TMPDIR
+    threads: 1
+    shell:'''
+    sourmash gather -o {output.csv} --threshold-bp 0 --scaled 2000 -k 31 {input.sig} {input.db} 
+    '''
+
+def checkpoint_metabat_1(wildcards):
+    # checkpoint_output encodes the output dir from the checkpoint rule.
+    checkpoint_output = checkpoints.metabat.get(**wildcards).output[0]    
+    file_names = expand("outputs/metabat2_gather/{{sample}}_bin.{binn}_gather_gtdb-rs202-genomic.csv",
+                        binn = glob_wildcards(os.path.join(checkpoint_output, "bin.{binn}.fa")).binn)
+    return file_names
+
+rule metabat_gather_dummy:
+    input: 
+        gtdb_lineages = "inputs/gtdb-rs202.taxonomy.v2.csv",
+        gather=checkpoint_metabat_1
+    output:
+        #tch=touch("outputs/metabat2_gather/{sample}_done.txt"),
+        charcoal_lineages="outputs/metabat2_gather_lineages/{sample}_bin_lineages.txt",
+    conda: "envs/tidy.yml"
+    resources:
+        mem_mb = 4000,
+        tmpdir = TMPDIR
+    threads: 1
+    script: "scripts/generate_charcoal_lineages.R"
+    
+def checkpoint_metabat_2(wildcards):
+    # checkpoint_output encodes the output dir from the checkpoint rule.
+    checkpoint_output = checkpoints.metabat.get(**wildcards).output[0]    
+    file_names = expand("outputs/metabat2/{{sample}}/bin.{binn}.fa",
+                        binn = glob_wildcards(os.path.join(checkpoint_output, "bin.{binn}.fa")).binn)
+    return file_names
+
+rule charcoal_generate_genome_list:
+    input: checkpoint_metabat_2
+    output: "outputs/metabat2_charcoal_conf/charcoal_{sample}.genome-list.txt"
+    threads: 1
+    resources:
+        mem_mb=500,
+        tmpdir = TMPDIR
+    params: genome_dir = lambda wildcards: "outputs/metabat2/" + wildcards.sample
+    shell:'''
+    ls {params.genome_dir}/*fa | xargs -n 1 basename > {output} 
+    '''
+
+rule charcoal_generate_conf_file:
+    input:
+        genome_list = "outputs/metabat2_charcoal_conf/charcoal_{sample}.genome-list.txt",
+        charcoal_lineages="outputs/metabat2_gather_lineages/{sample}_bin_lineages.txt",
+        db="/group/ctbrowngrp/gtdb/databases/ctb/gtdb-rs202.genomic.k31.sbt.zip",
+        db_lineages="inputs/gtdb-rs202.taxonomy.v2.csv"
+    output:
+        conf = "outputs/metabat2_charcoal_conf/charcoal-conf-{sample}.yml",
+    params: 
+        genome_dir = lambda wildcards: "outputs/metabat2/" + wildcards.sample,
+        output_dir = lambda wildcards: "outputs/metabat2_charcoal/" + wildcards.sample 
+    resources:
+        mem_mb = 500,
+        tmpdir = TMPDIR
+    threads: 1
+    run:
+        with open(output.conf, 'wt') as fp:
+            print(f"""\
+output_dir: {params.output_dir}
+genome_list: {input.genome_list}
+genome_dir: {params.genome_dir}
+provided_lineages: {input.charcoal_lineages}
+match_rank: order
+gather_db:
+ - {input.db} 
+lineages_csv: {input.db_lineages} 
+strict: 1
+""", file=fp)
+
+checkpoint metabat_charcoal:
+    input: conf = "outputs/metabat2_charcoal_conf/charcoal-conf-{sample}.yml",
+    output: directory("outputs/metabat2_charcoal/{sample}/")
+    resources:
+        mem_mb = 64000,
+        tmpdir = TMPDIR
+    threads: 2
+    conda: "envs/charcoal.yml"
+    shell:'''
+    python -m charcoal run {input.conf} -j {threads} clean --nolock --latency-wait 15 --rerun-incomplete --use-conda
+    '''
+
+rule metabat_gunzip_charcoal:
+    input: "outputs/metabat2_charcoal/{sample}/bin.{bin}.fa.clean.fa.gz"
+    output: "outputs/metabat2_charcoal/{sample}/bin.{bin}.fa.clean.fa"
+    resources:
+        mem_mb = 800,
+        tmpdir = TMPDIR
+    threads: 1
+    shell:'''
+    gunzip -c {input} > {output}
+    '''
+
+rule metabat_prokka:
+    input: "outputs/metabat2_charcoal/{sample}/bin.{bin}.fa.clean.fa"
+    output: "outputs/metabat2_prokka/{sample}_bin.{bin}.faa"
+    conda: 'envs/prokka.yml'
+    resources:
+        mem_mb = 8000,
+        tmpdir = TMPDIR
+    threads: 2
+    params: 
+        outdir = lambda wildcards: 'outputs/metabat2_prokka/'
+    shell:'''
+    prokka {input} --outdir {params.outdir} --prefix {wildcards.sample}_bin.{wildcards.bin} \
+        --metagenome --force --locustag {wildcards.sample}_bin.{wildcards.bin} --cpus {threads} --centre X --compliant
+    '''
+
+rule metabat_prokka_sketch:
+    input: "outputs/metabat2_prokka/{sample}_bin.{bin}.faa"
+    output: 'outputs/metabat2_prokka_sigs/{sample}_bin.{bin}.sig' 
+    conda: 'envs/sourmash.yml'
+    resources:
+        mem_mb = 4000,
+        tmpdir = TMPDIR
+    threads: 1
+    shell:"""
+    sourmash sketch protein -p k=10,scaled=100,protein -o {output} --name {wildcards.sample}_bin.{wildcards.bin} {input}
+    """
+
+def checkpoint_charcoal_1(wildcards):
+    # checkpoint_output encodes the output dir from the checkpoint rule.
+    checkpoint_output = checkpoints.metabat_charcoal.get(**wildcards).output[0]    
+    file_names = expand("outputs/metabat2_prokka_sigs/{{sample}}_bin.{bin}.sig",
+                        bin = glob_wildcards(os.path.join(checkpoint_output, "bin.{bin}.fa.clean.fa.gz")).bin)
+    return file_names
+
+rule metabat_prokka_sketch_dummy:
+    input: checkpoint_charcoal_1
+    output: touch("outputs/metabat2_prokka_sigs/{sample}_done.txt")
+
+rule metabat_generate_lists_of_bins_of_same_species:
+    input: 
+        lineages = "inputs/gtdb-rs202.taxonomy.v2.csv",
+        acc_to_db = ancient("outputs/genbank/gather_gtdb-rs202-genomic.x.dbs.csv"),
+        #dummy1 = expand("outputs/metabat2_gather/{sample}_done.txt", sample = SAMPLES),
+        dummy2 = expand("outputs/metabat2_prokka_sigs/{sample}_done.txt", sample = SAMPLES)
+    output: txt = "outputs/metabat2_gather_labelled_bins/{acc_db}.txt"
+    conda: 'envs/tidy.yml'
+    resources:
+        mem_mb = 16000,
+        tmpdir = TMPDIR
+    threads: 1
+    script: "scripts/metabat_generate_lists_of_bins_of_same_species.R"
+
+rule metabat_intersect_sigs_for_core:
+    input: "outputs/metabat2_gather_labelled_bins/{acc_db}.txt"
+    output: "outputs/metabat2_prokka_sigs_core/{acc_db}_core_kmers_unnamed.sig"
+    conda: 'envs/sourmash.yml'
+    resources:
+        mem_mb = 4000,
+        tmpdir = TMPDIR
+    threads: 1
+    shell:"""
+    sourmash sig intersect -o {output} --from-file {input} 
+    """
+    
+rule metabat_intersect_sigs_for_core_rename:
+    input:  "outputs/metabat2_prokka_sigs_core/{acc_db}_core_kmers_unnamed.sig"
+    output:  "outputs/metabat2_prokka_sigs_core/{acc_db}_core_kmers.sig"
+    conda: 'envs/sourmash.yml'
+    resources:
+        mem_mb = 4000,
+        tmpdir = TMPDIR
+    threads: 1
+    shell:"""
+    sourmash sig rename -o {output} {input} {wildcards.acc_db}_metabat2_core
+    """
+
+rule metabat_merge_species_sketches_for_all:
+    input: "outputs/metabat2_gather_labelled_bins/{acc_db}.txt"
+    output: "outputs/metabat2_prokka_sigs_all/{acc_db}_all_kmers.sig"
+    conda: 'envs/sourmash.yml'
+    resources:
+        mem_mb = 4000,
+        tmpdir = TMPDIR
+    threads: 1
+    shell:"""
+    sourmash sig merge --name {wildcards.acc_db}_metabat2_all -o {output} --from-file {input} 
+    """
+    
+rule metabat_sig_to_csv_species_for_all:
+    input: "outputs/metabat2_prokka_sigs_all/{acc_db}_all_kmers.sig"
+    output: "outputs/metabat2_prokka_sigs_all/{acc_db}_all_kmers.csv"
+    conda: 'envs/sourmash.yml'
+    resources:
+        mem_mb = 4000,
+        tmpdir = TMPDIR
+    threads: 1
+    shell:"""
+    python scripts/sig_to_csv.py {input} {output}
+    """
+    
+##############################################################
+## Pick organisms
+###############################################################
 
 rule sourmash_sketch:
     input: "outputs/abundtrim/{sample}.abundtrim.fq.gz"
@@ -290,8 +653,7 @@ rule download_matching_genome_wc:
             url = row['genome_url']
             name = row['ncbi_tax_name']
 
-            print(f"downloading genome for acc {acc}/{name} from NCBI...",
-                file=sys.stderr)
+            print(f"downloading genome for acc {acc}/{name} from NCBI...", file=sys.stderr)
             with open(output.genome, 'wb') as outfp:
                 with urllib.request.urlopen(url) as response:
                     content = response.read()
@@ -453,7 +815,6 @@ rule make_hash_table_long:
         tmpdir = TMPDIR
     script: "scripts/sketch_csv_to_long.R"
     
-# rule pagoo
 
 #######################################
 ## Species-specific databases
@@ -556,6 +917,97 @@ rule species_pagoo:
         mem_mb=8000,
         tmpdir = TMPDIR
     script: "scripts/pagoo_plt.R"
+
+# confirm which *strains* are present in kaa-mers
+rule sourmash_sketch_species_genomes_species_dna:
+    input: "outputs/orpheum_species/{sample}-{acc_db}.nuc_coding.fna",
+    output: 'outputs/nbhd_sigs_species/{sample}-{acc_db}-dna-k51.sig' 
+    conda: 'envs/sourmash.yml'
+    resources:
+        mem_mb = 4000,
+        tmpdir = TMPDIR
+    threads: 1
+    benchmark: "benchmarks/{sample}-{acc_db}_sketch.tsv"
+    shell:"""
+    sourmash sketch dna -p k=51,scaled=2000 -o {output} --name {wildcards.acc_db} {input}
+    """
+
+rule sourmash_gather_orpheum_species:
+    input:
+        sig = 'outputs/nbhd_sigs_species/{sample}-{acc_db}-dna-k51.sig',
+        db="/group/ctbrowngrp/gtdb/databases/ctb/gtdb-rs202.genomic.k51.sbt.zip",
+    output: 
+        csv="outputs/nbhd_species_gather/{sample}-{acc_db}_gather_gtdb-rs202-genomic.csv",
+        matches="outputs/nbhd_species_gather/{sample}-{acc_db}_gather_gtdb-rs202-genomic.matches",
+    conda: 'envs/sourmash.yml'
+    resources:
+        mem_mb = 16000,
+        tmpdir = TMPDIR
+    threads: 1
+    benchmark: "benchmarks/{sample}-{acc_db}_gather_nbhd_species.tsv"
+    shell:'''
+    sourmash gather -o {output.csv} --threshold-bp 0 --save-matches {output.matches} --scaled 2000 -k 51 {input.sig} {input.db} 
+    '''
+
+# create a signature for the *core* kaa-mer metapangenome
+rule generate_list_of_sigs_to_intersect_based_on_kmer_threshold:
+    input: csv="outputs/nbhd_sketch_tables_species/{acc_db}_long.csv"
+    output: lst="outputs/nbhd_sigs_species_lists/{acc_db}.txt"
+    conda: "envs/tidy.yml"
+    resources:
+        mem_mb = 4000,
+        tmpdir = TMPDIR
+    threads: 1
+    script: "scripts/kaa_generate_list_of_sigs_to_intersect.R"
+
+rule intersect_species_sketches_for_core:
+    input: "outputs/nbhd_sigs_species_lists/{acc_db}.txt"
+    output: 'outputs/nbhd_sigs_species_core/{acc_db}_core_kmers_unnamed.sig'
+    conda: 'envs/sourmash.yml'
+    resources:
+        mem_mb = 4000,
+        tmpdir = TMPDIR
+    threads: 1
+    shell:"""
+    sourmash sig intersect -o {output} --from-file {input} 
+    """
+
+rule rename_species_sketches_for_core:
+    input: 'outputs/nbhd_sigs_species_core/{acc_db}_core_kmers_unnamed.sig'
+    output: 'outputs/nbhd_sigs_species_core/{acc_db}_core_kmers.sig'
+    conda: 'envs/sourmash.yml'
+    resources:
+        mem_mb = 4000,
+        tmpdir = TMPDIR
+    threads: 1
+    shell:"""
+    sourmash sig rename -o {output} {input} {wildcards.acc_db}_kaa_core
+    """
+
+# create a signature for the *entire* kaa-mer metapangenome
+rule merge_species_sketches_for_all:
+    input: expand('outputs/nbhd_sigs_species/{sample}-{{acc_db}}.sig', sample = SAMPLES)
+    output: 'outputs/nbhd_sigs_species_all/{acc_db}_all_kmers.sig'
+    conda: 'envs/sourmash.yml'
+    resources:
+        mem_mb = 4000,
+        tmpdir = TMPDIR
+    threads: 1
+    shell:"""
+    sourmash sig merge --name {wildcards.acc_db}_kaa_all -o {output} {input} 
+    """
+
+rule species_sketches_sig_to_csv_for_all:
+    input: 'outputs/nbhd_sigs_species_all/{acc_db}_all_kmers.sig'
+    output: 'outputs/nbhd_sigs_species_all/{acc_db}_all_kmers.csv'
+    conda: 'envs/sourmash.yml'
+    resources:
+        mem_mb = 4000,
+        tmpdir = TMPDIR
+    threads: 1
+    shell:"""
+    python scripts/sig_to_csv.py {input} {output}
+    """
     
 ######################################################
 ## Compare species-level db and gtdb-level db results
@@ -593,4 +1045,498 @@ rule sourmash_compare_orpheum_outputs_max:
     threads: 1
     shell:'''
     sourmash compare --max-containment -o {output.comp} --csv {output.csv} {input}
+    '''
+
+##############################################################
+## Build reference pangenome to compare kmer nbhds against
+##############################################################
+
+# Note reference pangenomes were copied over from 2021-panmers,
+# to get around wildcard issues solving for species, and all 
+# genomes underneath that species.
+
+
+rule extract_pangenome_fasta_names:
+    input: 'outputs/roary/{species}/pan_genome_reference.fa',
+    output: 'outputs/roary/{species}/pan_genome_reference_names.txt'
+    threads: 1
+    resources: 
+        mem_mb= 4000,
+        tmpdir = TMPDIR
+    shell:'''
+    grep ">" {input} > {output}
+    '''
+
+rule identify_core_gene_sequence_names:
+    input: 
+        pg="outputs/pagoo_species/pagoo.txt",
+        pa='outputs/roary/{acc_db}/gene_presence_absence.csv', 
+        names='outputs/roary/{acc_db}/pan_genome_reference_names.txt'
+    output: core_names="outputs/roary/{acc_db}/pan_genome_reference_core_gene_names.txt"
+    threads: 1
+    conda: "envs/pagoo.yml"
+    resources: 
+        mem_mb= 16000,
+        tmpdir = TMPDIR
+    script: "scripts/identify_core_gene_sequence_names.R"
+
+rule extract_core_gene_sequences_from_pangenome:
+    input:
+        fa="outputs/roary/{acc_db}/pan_genome_reference.fa",
+        core_names="outputs/roary/{acc_db}/pan_genome_reference_core_gene_names.txt"
+    output: "outputs/roary/{acc_db}/pan_genome_reference_core_genes.fa"
+    conda: "envs/seqtk.yml"
+    resources:
+        mem_mb = 2000,
+        tmpdir=TMPDIR
+    threads: 1
+    shell:'''
+    seqtk subseq {input.fa} {input.core_names} > {output}
+    '''
+
+rule translate_core_gene_sequences_from_pangenome:
+    input: "outputs/roary/{acc_db}/pan_genome_reference_core_genes.fa"
+    output: "outputs/roary/{acc_db}/pan_genome_reference_core_genes.faa"
+    conda: 'envs/emboss.yml'
+    resources:
+        mem_mb = 4000,
+        tmpdir = TMPDIR
+    threads: 2
+    shell:'''
+    transeq {input} {output}
+    '''
+
+rule sketch_core_gene_sequences_from_pangenome:
+    input: "outputs/roary/{acc_db}/pan_genome_reference_core_genes.faa"
+    output: "outputs/roary_sigs_core/{acc_db}_pan_genome_reference_core_genes.sig"
+    conda: 'envs/sourmash.yml'
+    resources:
+        mem_mb = 4000,
+        tmpdir = TMPDIR
+    threads: 1
+    shell:"""
+    sourmash sketch protein -p k=10,scaled=100,protein -o {output} --name {wildcards.acc_db}_roary_core {input}
+    """
+ 
+rule sketch_all_gene_sequences_from_pangenome:
+    input: "outputs/roary/{acc_db}/pan_genome_reference_core_genes.faa"
+    output: "outputs/roary_sigs_all/{acc_db}_pan_genome_reference_all_genes.sig"
+    conda: 'envs/sourmash.yml'
+    resources:
+        mem_mb = 4000,
+        tmpdir = TMPDIR
+    threads: 1
+    shell:"""
+    sourmash sketch protein -p k=10,scaled=100,protein -o {output} --name {wildcards.acc_db}_roary_all {input}
+    """
+ 
+rule roary_sketches_sig_to_csv_for_all:
+    input: "outputs/roary_sigs_all/{acc_db}_pan_genome_reference_all_genes.sig"
+    output: "outputs/roary_sigs_all/{acc_db}_pan_genome_reference_all_genes.csv"
+    conda: 'envs/sourmash.yml'
+    resources:
+        mem_mb = 4000,
+        tmpdir = TMPDIR
+    threads: 1
+    shell:"""
+    python scripts/sig_to_csv.py {input} {output}
+    """
+    
+#############################################################
+## compare containment/similarity across core sequences
+#############################################################
+
+rule compare_similarity_pangenomes_core: 
+    input:
+        kmer='outputs/nbhd_sigs_species_core/{acc_db}_core_kmers.sig',
+        gene="outputs/roary_sigs_core/{acc_db}_pan_genome_reference_core_genes.sig",
+        bins="outputs/metabat2_prokka_sigs_core/{acc_db}_core_kmers.sig"
+    output: "outputs/compare_core/{acc_db}_similarity.csv"
+    conda: 'envs/sourmash.yml'
+    resources:
+        mem_mb = 4000,
+        tmpdir = TMPDIR
+    threads: 1
+    shell:"""
+    sourmash compare --csv {output} {input}
+    """
+
+rule compare_containment_pangenomes_core: 
+    input:
+        kmer='outputs/nbhd_sigs_species_core/{acc_db}_core_kmers.sig',
+        gene="outputs/roary_sigs_core/{acc_db}_pan_genome_reference_core_genes.sig",
+        bins="outputs/metabat2_prokka_sigs_core/{acc_db}_core_kmers.sig"
+    output: "outputs/compare_core/{acc_db}_containment.csv"
+    conda: 'envs/sourmash.yml'
+    resources:
+        mem_mb = 4000,
+        tmpdir = TMPDIR
+    threads: 1
+    shell:"""
+    sourmash compare --containment --csv {output} {input}
+    """
+
+rule compare_maxcontainment_pangenomes_core: 
+    input:
+        kmer='outputs/nbhd_sigs_species_core/{acc_db}_core_kmers.sig',
+        gene="outputs/roary_sigs_core/{acc_db}_pan_genome_reference_core_genes.sig",
+        bins="outputs/metabat2_prokka_sigs_core/{acc_db}_core_kmers.sig"
+    output: "outputs/compare_core/{acc_db}_maxcontainment.csv"
+    conda: 'envs/sourmash.yml'
+    resources:
+        mem_mb = 4000,
+        tmpdir = TMPDIR
+    threads: 1
+    shell:"""
+    sourmash compare --max-containment --csv {output} {input}
+    """
+    
+    
+###########################################
+## Compare whole pangenomes
+###########################################
+
+    
+rule compare_similarity_pangenomes_all: 
+    input:
+        kmer='outputs/nbhd_sigs_species_all/{acc_db}_all_kmers.sig',
+        gene="outputs/roary_sigs_all/{acc_db}_pan_genome_reference_all_genes.sig",
+        bins="outputs/metabat2_prokka_sigs_all/{acc_db}_all_kmers.sig"
+    output: "outputs/compare_all/{acc_db}_similarity.csv"
+    conda: 'envs/sourmash.yml'
+    resources:
+        mem_mb = 4000,
+        tmpdir = TMPDIR
+    threads: 1
+    shell:"""
+    sourmash compare --csv {output} {input}
+    """
+
+rule compare_containment_pangenomes_all: 
+    input:
+        kmer='outputs/nbhd_sigs_species_all/{acc_db}_all_kmers.sig',
+        gene="outputs/roary_sigs_all/{acc_db}_pan_genome_reference_all_genes.sig",
+        bins="outputs/metabat2_prokka_sigs_all/{acc_db}_all_kmers.sig"
+    output: "outputs/compare_all/{acc_db}_containment.csv"
+    conda: 'envs/sourmash.yml'
+    resources:
+        mem_mb = 4000,
+        tmpdir = TMPDIR
+    threads: 1
+    shell:"""
+    sourmash compare --containment --csv {output} {input}
+    """
+
+rule compare_maxcontainment_pangenomes_all: 
+    input:
+        kmer='outputs/nbhd_sigs_species_all/{acc_db}_all_kmers.sig',
+        gene="outputs/roary_sigs_all/{acc_db}_pan_genome_reference_all_genes.sig",
+        bins="outputs/metabat2_prokka_sigs_all/{acc_db}_all_kmers.sig"
+    output: "outputs/compare_all/{acc_db}_maxcontainment.csv"
+    conda: 'envs/sourmash.yml'
+    resources:
+        mem_mb = 4000,
+        tmpdir = TMPDIR
+    threads: 1
+    shell:"""
+    sourmash compare --max-containment --csv {output} {input}
+    """
+
+###############################################################################################
+## Map nbhd reads (orph species filt) against pangenome and bins to find kaa-mer distinct seqs
+###############################################################################################
+
+rule find_metabat_genes_filenames_for_bins_of_same_species:
+    input: txt = "outputs/metabat2_gather_labelled_bins/{acc_db}.txt"
+    output: txt = "outputs/metabat2_prokka_labelled_bins/{acc_db}_ffn.txt"
+    conda: "envs/tidy.yml"
+    resources:
+        mem_mb = 4000,
+        tmpdir = TMPDIR
+    threads: 1
+    script: "scripts/metabat_generate_lists_of_bins_of_same_species_prokka_ffn.R"
+ 
+rule combine_metabat_genes_using_filenames_for_bins_of_same_species:
+    input: txt = "outputs/metabat2_prokka_labelled_bins/{acc_db}_ffn.txt"
+    output: "outputs/metabat2_prokka_combined/{acc_db}.ffn"
+    resources:
+        mem_mb = 4000,
+        tmpdir = TMPDIR
+    threads: 1
+    shell:'''
+    xargs cat < {input} > {output}
+    '''
+
+rule cluster_metabat_genes:
+    input: "outputs/metabat2_prokka_combined/{acc_db}.ffn"
+    output: "outputs/metabat2_prokka_combined_clustered/{acc_db}.fa"
+    threads: 1
+    resources: 
+        mem_mb=16000,
+        tmpdir=TMPDIR
+    conda: "envs/cdhit.yml"
+    shell:'''
+    cd-hit-est -c .95 -d 0 -i {input} -o {output}
+    '''
+
+rule index_metabat_genes:
+    input: "outputs/metabat2_prokka_combined_clustered/{acc_db}.fa"
+    output: "outputs/metabat2_prokka_combined_clustered/{acc_db}.fa.bwt"
+    conda: "envs/bwa.yml"
+    resources: mem_mb = 2000
+    threads: 1
+    shell:'''
+    bwa index {input}
+    ''' 
+
+rule index_roary:
+    input: "outputs/roary/{acc_db}/pan_genome_reference.fa"
+    output: "outputs/roary/{acc_db}/pan_genome_reference.fa.bwt"
+    conda: "envs/bwa.yml"
+    resources: mem_mb = 2000
+    threads: 1
+    shell:'''
+    bwa index {input}
+    ''' 
+
+rule map_nucleotide_reads_against_roary:
+    input: 
+        ref_assembly= "outputs/roary/{acc_db}/pan_genome_reference.fa",
+        ref_assembly_bwt=  "outputs/roary/{acc_db}/pan_genome_reference.fa.bwt",
+        reads="outputs/orpheum_species/{sample}-{acc_db}.nuc_coding.fna"
+    output: "outputs/orpheum_species_map/00_roary_nucleotide/{sample}-{acc_db}.bam"
+    conda: "envs/bwa.yml"
+    threads: 4
+    resources: mem_mb = 4000
+    shell:'''
+    bwa mem -p -t {threads} {input.ref_assembly} {input.reads} | samtools sort -o {output} -
+    '''
+
+rule stat_roary:
+    input: "outputs/orpheum_species_map/00_roary_nucleotide/{sample}-{acc_db}.bam"
+    output: "outputs/orpheum_species_map/00_roary_nucleotide/{sample}-{acc_db}.stat"
+    conda: "envs/bwa.yml"
+    resources:
+        mem_mb = 2000,
+        tmpdir = TMPDIR
+    shell:'''
+    samtools view -h {input} | samtools stats | grep '^SN' | cut -f 2- > {output}
+    '''
+rule identify_unmapped_reads_from_roary:
+    input: "outputs/orpheum_species_map/00_roary_nucleotide/{sample}-{acc_db}.bam"
+    output: "outputs/orpheum_species_map/01_unmapped_nucleotide/{sample}-{acc_db}_unmapped.bam"
+    resources: 
+        mem_mb = 8000,
+        tmpdir=TMPDIR
+    threads: 1
+    conda: 'envs/bwa.yml'
+    shell:'''
+    samtools view -b -f 4 {input} > {output}
+    '''
+
+rule extract_unmapped_reads_from_roary:
+    input: "outputs/orpheum_species_map/01_unmapped_nucleotide/{sample}-{acc_db}_unmapped.bam"
+    output: "outputs/orpheum_species_map/01_unmapped_nucleotide/{sample}-{acc_db}.fq"
+    resources: 
+        mem_mb = 8000,
+        tmpdir=TMPDIR
+    conda: 'envs/bwa.yml'
+    threads: 1
+    shell:'''
+    samtools fastq -N -0 {output} {input}
+    '''
+
+rule map_nucleotide_reads_against_metabat:
+    input: 
+        ref_assembly= "outputs/metabat2_prokka_combined_clustered/{acc_db}.fa",
+        ref_assembly_bwt= "outputs/metabat2_prokka_combined_clustered/{acc_db}.fa.bwt",
+        reads = "outputs/orpheum_species_map/01_unmapped_nucleotide/{sample}-{acc_db}.fq"
+    output: "outputs/orpheum_species_map/02_metabat_nucleotide/{sample}-{acc_db}.bam"
+    conda: "envs/bwa.yml"
+    threads: 4
+    resources: mem_mb = 4000
+    shell:'''
+    bwa mem -p -t {threads} {input.ref_assembly} {input.reads} | samtools sort -o {output} -
+    '''
+
+rule stat_metabat:
+    input: "outputs/orpheum_species_map/02_metabat_nucleotide/{sample}-{acc_db}.bam"
+    output: "outputs/orpheum_species_map/02_metabat_nucleotide/{sample}-{acc_db}.stat"
+    conda: "envs/bwa.yml"
+    resources:
+        mem_mb = 2000,
+        tmpdir = TMPDIR
+    shell:'''
+    samtools view -h {input} | samtools stats | grep '^SN' | cut -f 2- > {output}
+    '''
+rule identify_unmapped_reads_from_metabat:
+    input: "outputs/orpheum_species_map/02_metabat_nucleotide/{sample}-{acc_db}.bam"
+    output: "outputs/orpheum_species_map/03_unmapped_nucleotide/{sample}-{acc_db}_unmapped.bam"
+    resources: 
+        mem_mb = 8000,
+        tmpdir=TMPDIR
+    threads: 1
+    conda: 'envs/bwa.yml'
+    shell:'''
+    samtools view -b -f 4 {input} > {output}
+    '''
+
+rule extract_unmapped_reads_from_metabat:
+    input: "outputs/orpheum_species_map/03_unmapped_nucleotide/{sample}-{acc_db}_unmapped.bam"
+    output: "outputs/orpheum_species_map/03_unmapped_nucleotide/{sample}-{acc_db}.fq"
+    resources: 
+        mem_mb = 8000,
+        tmpdir=TMPDIR
+    conda: 'envs/bwa.yml'
+    threads: 1
+    shell:'''
+    samtools fastq -N -0 {output} {input}
+    '''
+
+###############################################################################################
+## Map nbhd reads (orph species filt) against pangenome and bins to find kaa-mer distinct seqs -- amino acid
+###############################################################################################
+
+rule translate_metabat_genes:
+    input: "outputs/metabat2_prokka_combined_clustered/{acc_db}.fa"
+    output: "outputs/metabat2_prokka_combined_clustered/{acc_db}.faa"
+    conda: 'envs/emboss.yml'
+    resources:
+        mem_mb = 4000,
+        tmpdir = TMPDIR
+    threads: 2
+    shell:'''
+    transeq {input} {output}
+    '''
+
+rule index_metabat_proteins:
+    input: "outputs/metabat2_prokka_combined_clustered/{acc_db}.faa"
+    output: "outputs/metabat2_prokka_combined_clustered/{acc_db}.faa.pro"
+    threads: 1
+    resources:
+      mem_mb=4000,
+      tmpdir=TMPDIR
+    conda: "envs/paladin.yml"
+    shell:'''
+    paladin index -r3 {input}
+    '''
+
+rule translate_gene_sequences_from_pangenome:
+    input: "outputs/roary/{acc_db}/pan_genome_reference.fa"
+    output: "outputs/roary/{acc_db}/pan_genome_reference.faa"
+    conda: 'envs/emboss.yml'
+    resources:
+        mem_mb = 4000,
+        tmpdir = TMPDIR
+    threads: 2
+    shell:'''
+    transeq {input} {output}
+    '''
+    
+rule index_roary_proteins:
+    input: "outputs/roary/{acc_db}/pan_genome_reference.faa"
+    output: "outputs/roary/{acc_db}/pan_genome_reference.faa.pro"
+    threads: 1
+    resources:
+      mem_mb=4000,
+      tmpdir=TMPDIR
+    conda: "envs/paladin.yml"
+    shell:'''
+    paladin index -r3 {input}
+    '''
+
+rule map_nucleotide_reads_against_roary_faa:
+    input: 
+        ref_assembly= "outputs/roary/{acc_db}/pan_genome_reference.faa",
+        ref_assembly_bwt= "outputs/roary/{acc_db}/pan_genome_reference.faa.pro",
+        reads="outputs/orpheum_species/{sample}-{acc_db}.nuc_coding.fna"
+    output: "outputs/orpheum_species_map/00_roary_aminoacid/{sample}-{acc_db}.bam"
+    conda: "envs/paladin.yml"
+    threads: 4
+    resources: mem_mb = 12000
+    shell:'''
+    paladin align -C -t {threads} {input.ref_assembly} {input.reads} | samtools sort -o {output} -
+    '''
+
+rule stat_roary_faa:
+    input: "outputs/orpheum_species_map/00_roary_aminoacid/{sample}-{acc_db}.bam"
+    output: "outputs/orpheum_species_map/00_roary_aminoacid/{sample}-{acc_db}.stat"
+    conda: "envs/bwa.yml"
+    resources:
+        mem_mb = 2000,
+        tmpdir = TMPDIR
+    shell:'''
+    samtools view -h {input} | samtools stats | grep '^SN' | cut -f 2- > {output}
+    '''
+
+rule identify_unmapped_reads_from_roary_faa:
+    input: "outputs/orpheum_species_map/00_roary_aminoacid/{sample}-{acc_db}.bam"
+    output: "outputs/orpheum_species_map/01_unmapped_aminoacid/{sample}-{acc_db}_unmapped.bam"
+    resources: 
+        mem_mb = 8000,
+        tmpdir=TMPDIR
+    threads: 1
+    conda: 'envs/bwa.yml'
+    shell:'''
+    samtools view -b -f 4 {input} > {output}
+    '''
+
+rule extract_unmapped_reads_from_roary_faa:
+    input: "outputs/orpheum_species_map/01_unmapped_aminoacid/{sample}-{acc_db}_unmapped.bam"
+    output: "outputs/orpheum_species_map/01_unmapped_aminoacid/{sample}-{acc_db}.fq"
+    resources: 
+        mem_mb = 8000,
+        tmpdir=TMPDIR
+    conda: 'envs/bwa.yml'
+    threads: 1
+    shell:'''
+    samtools fastq -N -0 {output} {input}
+    '''
+
+rule map_nucleotide_reads_against_metabat_faa:
+    input: 
+        ref_assembly= "outputs/metabat2_prokka_combined_clustered/{acc_db}.faa",
+        ref_assembly_bwt= "outputs/metabat2_prokka_combined_clustered/{acc_db}.faa.pro",
+        reads = "outputs/orpheum_species_map/01_unmapped_aminoacid/{sample}-{acc_db}.fq"
+    output: "outputs/orpheum_species_map/02_metabat_aminoacid/{sample}-{acc_db}.bam"
+    conda: "envs/paladin.yml"
+    threads: 4
+    resources: mem_mb = 12000
+    shell:'''
+    paladin align -C -t {threads} {input.ref_assembly} {input.reads} | samtools sort -o {output} -
+    '''
+
+rule identify_unmapped_reads_from_metabat_faa:
+    input: "outputs/orpheum_species_map/02_metabat_aminoacid/{sample}-{acc_db}.bam"
+    output: "outputs/orpheum_species_map/03_unmapped_aminoacid/{sample}-{acc_db}_unmapped.bam"
+    resources: 
+        mem_mb = 8000,
+        tmpdir=TMPDIR
+    threads: 1
+    conda: 'envs/bwa.yml'
+    shell:'''
+    samtools view -b -f 4 {input} > {output}
+    '''
+
+rule stat_metabat_faa:
+    input: "outputs/orpheum_species_map/02_metabat_aminoacid/{sample}-{acc_db}.bam"
+    output: "outputs/orpheum_species_map/02_metabat_aminoacid/{sample}-{acc_db}.stat"
+    conda: "envs/bwa.yml"
+    resources:
+        mem_mb = 2000,
+        tmpdir = TMPDIR
+    shell:'''
+    samtools view -h {input} | samtools stats | grep '^SN' | cut -f 2- > {output}
+    '''
+
+rule extract_unmapped_reads_from_metabat_faa:
+    input: "outputs/orpheum_species_map/03_unmapped_aminoacid/{sample}-{acc_db}_unmapped.bam"
+    output: "outputs/orpheum_species_map/03_unmapped_aminoacid/{sample}-{acc_db}.fq"
+    resources: 
+        mem_mb = 8000,
+        tmpdir=TMPDIR
+    conda: 'envs/bwa.yml'
+    threads: 1
+    shell:'''
+    samtools fastq -N -0 {output} {input}
     '''
