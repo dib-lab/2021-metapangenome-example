@@ -1,3 +1,10 @@
+This repository implements an example workflow for performing metapangenomics using amino acid k-mers, and compares this pipeline against existing metapangenome approaches.
+The results of this workflow are written up at github.com/dib-lab/2021-paper-metapangenomes.
+
+## Getting started
+
+The workflow is written in snakemake with software managed by conda. The workflow can be re-run with the following (snakemake command assumes a slurm cluster, and executes as a dry run first).
+
 ```
 conda env create --name orph --file environment.yml
 conda activate orph
