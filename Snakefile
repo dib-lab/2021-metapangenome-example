@@ -111,6 +111,8 @@ rule all:
         Checkpoint_AccToDbs(expand("outputs/orpheum_species_map/02_metabat_nucleotide/{sample}-{{acc_db}}.stat", sample = SAMPLES)),
         Checkpoint_AccToDbs(expand("outputs/orpheum_species_map/00_roary_aminoacid/{sample}-{{acc_db}}.stat", sample = SAMPLES)),
         Checkpoint_AccToDbs(expand("outputs/orpheum_species_map/02_metabat_aminoacid/{sample}-{{acc_db}}.stat", sample = SAMPLES)),
+        Checkpoint_AccToDbs(expand("outputs/orpheum_species_unmapped/01_gather/{sample}-{{acc_db}}.csv", sample = SAMPLES)),
+        Checkpoint_AccToDbs("outputs/orpheum_species_unmapped/03_prokka/{acc_db}_combined.faa"),
 
 
 rule fastp:
@@ -1493,11 +1495,46 @@ rule extract_unmapped_reads_from_roary_faa:
     samtools fastq -N -0 {output} {input}
     '''
 
+rule grab_unmapped_read_names_from_roary_faa:
+    input: "outputs/orpheum_species_map/01_unmapped_aminoacid/{sample}-{acc_db}.fq"
+    output: "outputs/orpheum_species_map/01_unmapped_aminoacid/{sample}-{acc_db}_names.txt"
+    resources: 
+        mem_mb = 800,
+        tmpdir=TMPDIR
+    threads: 1
+    shell:'''
+    grep "^@" {input} > {output}
+    '''
+
+rule rm_unmapped_read_name_prefixes_from_roary_faa:
+    input: names="outputs/orpheum_species_map/01_unmapped_aminoacid/{sample}-{acc_db}_names.txt"
+    output: lst="outputs/orpheum_species_map/01_unmapped_aminoacid/{sample}-{acc_db}_original_names.txt"
+    resources: 
+        mem_mb = 8000,
+        tmpdir=TMPDIR
+    conda: 'envs/tidy.yml'
+    threads: 1
+    script: "scripts/rm_unmapped_read_name_prefixes.R"
+    
+rule grab_unmapped_reads_from_roary_faa_as_nucleotide:
+    input: 
+        lst="outputs/orpheum_species_map/01_unmapped_aminoacid/{sample}-{acc_db}_original_names.txt",
+        reads="outputs/orpheum_species/{sample}-{acc_db}.nuc_coding.fna"
+    output: "outputs/orpheum_species_map/01_unmapped_aminoacid/{sample}-{acc_db}_nucleotide.fna"
+    conda: "envs/seqtk.yml"
+    resources:
+        mem_mb = 2000,
+        tmpdir=TMPDIR
+    threads: 1
+    shell:'''
+    seqtk subseq {input.reads} {input.lst} > {output}
+    '''
+
 rule map_nucleotide_reads_against_metabat_faa:
     input: 
         ref_assembly= "outputs/metabat2_prokka_combined_clustered/{acc_db}.faa",
         ref_assembly_bwt= "outputs/metabat2_prokka_combined_clustered/{acc_db}.faa.pro",
-        reads = "outputs/orpheum_species_map/01_unmapped_aminoacid/{sample}-{acc_db}.fq"
+        reads= "outputs/orpheum_species_map/01_unmapped_aminoacid/{sample}-{acc_db}_nucleotide.fna"
     output: "outputs/orpheum_species_map/02_metabat_aminoacid/{sample}-{acc_db}.bam"
     conda: "envs/paladin.yml"
     threads: 4
@@ -1539,4 +1576,111 @@ rule extract_unmapped_reads_from_metabat_faa:
     threads: 1
     shell:'''
     samtools fastq -N -0 {output} {input}
+    '''
+
+
+rule grab_unmapped_read_names_from_metabat_faa:
+    input: "outputs/orpheum_species_map/03_unmapped_aminoacid/{sample}-{acc_db}.fq"
+    output: "outputs/orpheum_species_map/03_unmapped_aminoacid/{sample}-{acc_db}_names.txt"
+    resources:
+        mem_mb = 800,
+        tmpdir=TMPDIR
+    threads: 1
+    shell:'''
+    grep "^@" {input} > {output}
+    '''
+
+rule rm_unmapped_read_name_prefixes_from_metabat_faa:
+    input: names="outputs/orpheum_species_map/03_unmapped_aminoacid/{sample}-{acc_db}_names.txt"
+    output: lst="outputs/orpheum_species_map/03_unmapped_aminoacid/{sample}-{acc_db}_original_names.txt"
+    resources:
+        mem_mb = 8000,
+        tmpdir=TMPDIR
+    conda: 'envs/tidy.yml'
+    threads: 1
+    script: "scripts/rm_unmapped_read_name_prefixes.R"
+
+rule grab_unmapped_reads_from_metabat_faa_as_nucleotide:
+    input:
+        lst="outputs/orpheum_species_map/03_unmapped_aminoacid/{sample}-{acc_db}_original_names.txt",
+        reads="outputs/orpheum_species/{sample}-{acc_db}.nuc_coding.fna"
+    output: "outputs/orpheum_species_map/03_unmapped_aminoacid/{sample}-{acc_db}_nucleotide.fna"
+    conda: "envs/seqtk.yml"
+    resources:
+        mem_mb = 2000,
+        tmpdir=TMPDIR
+    threads: 1
+    shell:'''
+    seqtk subseq {input.reads} {input.lst} > {output}
+    '''
+
+#########################################################
+## Analyze unmapped reads from amino acid mapping
+#########################################################
+
+rule sourmash_sketch_unmapped_species_dna:
+    input: "outputs/orpheum_species_map/03_unmapped_aminoacid/{sample}-{acc_db}_nucleotide.fna"
+    output: "outputs/orpheum_species_unmapped/00_sigs/{sample}-{acc_db}.sig"
+    conda: 'envs/sourmash.yml'
+    resources:
+        mem_mb = 4000,
+        tmpdir = TMPDIR
+    threads: 1
+    shell:"""
+    sourmash sketch dna -p k=51,scaled=2000 -o {output} --name {wildcards.sample}-{wildcards.acc_db} {input}
+    """
+
+rule gather_on_unmapped_species:
+    input: 
+        sig="outputs/orpheum_species_unmapped/00_sigs/{sample}-{acc_db}.sig",
+        db="/group/ctbrowngrp/gtdb/databases/ctb/gtdb-rs202.genomic.k51.sbt.zip",
+    output: "outputs/orpheum_species_unmapped/01_gather/{sample}-{acc_db}.csv"
+    conda: 'envs/sourmash.yml'
+    resources:
+        mem_mb = 16000,
+        tmpdir = TMPDIR
+    threads: 1
+    shell:'''
+    sourmash gather -o {output} --threshold-bp 0 --scaled 2000 -k 51 {input.sig} {input.db} 
+    '''
+
+rule assemble_unmapped_species:
+    input: "outputs/orpheum_species_map/03_unmapped_aminoacid/{sample}-{acc_db}_nucleotide.fna"
+    output:
+        tmp_dir = directory("outputs/orpheum_species_unmapped/02_megahit/{sample}-{acc_db}_tmp"), 
+        fa="outputs/orpheum_species_unmapped/02_megahit/{sample}-{acc_db}.contigs.fa"
+    conda: 'envs/megahit.yml'
+    threads: 1
+    resources:
+        mem_mb=8000,
+        tmpdir = TMPDIR
+    shell:'''
+    megahit -r {input} --out-dir {output.tmp_dir} --out-prefix {wildcards.sample}-{wildcards.acc_db}
+    mv {output.tmp_dir}/{wildcards.sample}-{wildcards.acc_db}.contigs.fa {output.fa}
+    '''
+
+rule prokka_unmapped_species:
+    input: "outputs/orpheum_species_unmapped/02_megahit/{sample}-{acc_db}.contigs.fa"
+    output: "outputs/orpheum_species_unmapped/03_prokka/{sample}-{acc_db}.faa"
+    conda: 'envs/prokka.yml'
+    resources:
+        mem_mb = 8000,
+        tmpdir = TMPDIR
+    threads: 1
+    params: 
+        outdir = 'outputs/orpheum_species_unmapped/03_prokka'
+    shell:'''
+    prokka {input} --outdir {params.outdir} --prefix {wildcards.sample}-{wildcards.acc_db} \
+        --metagenome --force --locustag {wildcards.sample} --cpus {threads} --centre X --compliant
+    '''
+
+rule combine_prokka_unmapped_species:
+    input: expand("outputs/orpheum_species_unmapped/03_prokka/{sample}-{{acc_db}}.faa", sample = SAMPLES)
+    output: "outputs/orpheum_species_unmapped/03_prokka/{acc_db}_combined.faa"
+    resources:
+        mem_mb = 1000,
+        tmpdir = TMPDIR
+    threads: 1
+    shell:'''
+    cat {input} > {output}
     '''
